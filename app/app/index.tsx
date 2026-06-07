@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import {
   View,
   Text,
@@ -7,6 +7,13 @@ import {
   Dimensions,
   StyleSheet,
 } from 'react-native'
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  runOnJS,
+  Easing,
+} from 'react-native-reanimated'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import { useRouter } from 'expo-router'
@@ -23,6 +30,9 @@ import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const CARD_WIDTH = (SCREEN_WIDTH - Spacing.screenH * 2) / 2.4
+// Projects grid: 20px padding each side, 16px gap between columns
+const PROJECT_CARD_WIDTH = Math.floor((SCREEN_WIDTH - Spacing.screenH * 2 - 16) / 2)
+const PROJECT_THUMB_SIZE = Math.floor(PROJECT_CARD_WIDTH / 2)
 
 const topTags = getTopTags(5)
 
@@ -33,14 +43,30 @@ const TABS: Tab[] = [
   ...topTags.map(tag => ({ key: tag, label: tag.toUpperCase() })),
 ]
 
+type ActiveView = { type: 'tag'; key: string } | { type: 'project'; project: Project }
+
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function Header() {
+function Header({ project, onBack }: { project: Project | null; onBack: () => void }) {
   return (
     <View style={styles.header}>
-      <Ionicons name="menu" size={24} color={Colors.primary} />
-      <Text style={styles.headerTitle}>Shelf</Text>
-      <Ionicons name="search" size={22} color={Colors.primary} />
+      {project ? (
+        <Pressable onPress={onBack} hitSlop={8}>
+          <Ionicons name="arrow-back" size={24} color={Colors.primary} />
+        </Pressable>
+      ) : (
+        <Ionicons name="menu" size={24} color={Colors.primary} />
+      )}
+      <Text style={styles.headerTitle} adjustsFontSizeToFit numberOfLines={1}>
+        {project ? project.name : 'Shelf'}
+      </Text>
+      {project ? (
+        <Pressable hitSlop={8}>
+          <Ionicons name="create-outline" size={22} color={Colors.primary} />
+        </Pressable>
+      ) : (
+        <Ionicons name="search" size={22} color={Colors.primary} />
+      )}
     </View>
   )
 }
@@ -139,28 +165,52 @@ function TagFeed({ links }: { links: Link[] }) {
   )
 }
 
-function ProjectCollage({ project }: { project: Project }) {
+function ProjectCollage({ project, onPress }: { project: Project; onPress: () => void }) {
   const links = getLinksForProject(project.id)
   const thumbnails = links.slice(0, 4).map(l => l.thumbnail)
-  const router = useRouter()
+  const size = PROJECT_CARD_WIDTH
+  const half = PROJECT_THUMB_SIZE
+  const count = thumbnails.length
+
+  const renderInner = () => {
+    if (count === 0) {
+      return <View style={{ width: size, height: size, backgroundColor: '#E0DAD1' }} />
+    }
+    if (count === 1) {
+      return <Image source={{ uri: thumbnails[0] }} style={{ width: size, height: size }} contentFit="cover" />
+    }
+    if (count === 2) {
+      return (
+        <>
+          <Image source={{ uri: thumbnails[0] }} style={{ width: size, height: half }} contentFit="cover" />
+          <Image source={{ uri: thumbnails[1] }} style={{ width: size, height: half }} contentFit="cover" />
+        </>
+      )
+    }
+    if (count === 3) {
+      return (
+        <>
+          <Image source={{ uri: thumbnails[0] }} style={{ width: size, height: half }} contentFit="cover" />
+          <View style={{ flexDirection: 'row' }}>
+            <Image source={{ uri: thumbnails[1] }} style={{ width: half, height: half }} contentFit="cover" />
+            <Image source={{ uri: thumbnails[2] }} style={{ width: half, height: half }} contentFit="cover" />
+          </View>
+        </>
+      )
+    }
+    return (
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', width: size }}>
+        {thumbnails.slice(0, 4).map((uri, i) => (
+          <Image key={i} source={{ uri }} style={{ width: half, height: half }} contentFit="cover" />
+        ))}
+      </View>
+    )
+  }
 
   return (
-    <Pressable style={styles.projectCard} onPress={() => router.push(`/project/${project.id}`)}>
-      <View style={styles.projectCollage}>
-        {thumbnails.length > 0 ? (
-          thumbnails.map((uri, i) => (
-            <Image
-              key={i}
-              source={{ uri }}
-              style={styles.projectThumb}
-              contentFit="cover"
-            />
-          ))
-        ) : (
-          <View style={[styles.projectCollage, styles.projectEmpty]}>
-            <Text style={styles.projectEmptyLabel}>{project.name}</Text>
-          </View>
-        )}
+    <Pressable style={styles.projectCard} onPress={onPress}>
+      <View style={[styles.projectCollage, { width: size, height: size }]}>
+        {renderInner()}
       </View>
       <Text style={styles.projectName}>{project.name}</Text>
       <Text style={styles.projectCount}>{project.linkCount} saved</Text>
@@ -168,7 +218,7 @@ function ProjectCollage({ project }: { project: Project }) {
   )
 }
 
-function ProjectsGrid() {
+function ProjectsGrid({ onProjectPress }: { onProjectPress: (p: Project) => void }) {
   const pairs: Project[][] = []
   for (let i = 0; i < mockProjects.length; i += 2) {
     pairs.push(mockProjects.slice(i, i + 2))
@@ -178,7 +228,7 @@ function ProjectsGrid() {
       {pairs.map((pair, i) => (
         <View key={i} style={styles.projectRow}>
           {pair.map(p => (
-            <ProjectCollage key={p.id} project={p} />
+            <ProjectCollage key={p.id} project={p} onPress={() => onProjectPress(p)} />
           ))}
           {pair.length === 1 && <View style={styles.projectCard} />}
         </View>
@@ -199,26 +249,78 @@ function FAB() {
 
 // ─── Screen ──────────────────────────────────────────────────────────────────
 
-export default function HomeScreen() {
-  const [activeKey, setActiveKey] = useState('all')
+function linksForView(view: ActiveView): Link[] {
+  if (view.type === 'project') return getLinksForProject(view.project.id)
+  if (view.key === 'all') return mockLinks
+  if (view.key === 'projects') return []
+  return mockLinks.filter(l => l.tags.includes(view.key))
+}
 
-  const feedLinks =
-    activeKey === 'all'
-      ? mockLinks
-      : activeKey === 'projects'
-        ? []
-        : mockLinks.filter(l => l.tags.includes(activeKey))
+export default function HomeScreen() {
+  const [activeView, setActiveView] = useState<ActiveView>({ type: 'tag', key: 'all' })
+  const [bodyView, setBodyView] = useState<ActiveView>({ type: 'tag', key: 'all' })
+  const [nextBodyView, setNextBodyView] = useState<ActiveView | null>(null)
+  const slideX = useSharedValue(0)
+  const isAnimating = useRef(false)
+
+  const activeTabKey = activeView.type === 'tag' ? activeView.key : 'projects'
+  const activeProject = activeView.type === 'project' ? activeView.project : null
+
+  const finishTransition = useCallback((view: ActiveView) => {
+    setBodyView(view)
+    setNextBodyView(null)
+    isAnimating.current = false
+  }, [])
+
+  function navigate(newView: ActiveView) {
+    setActiveView(newView)
+    if (isAnimating.current) return
+    isAnimating.current = true
+    setNextBodyView(newView)
+    slideX.value = withTiming(-SCREEN_WIDTH, {
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+    }, finished => {
+      if (finished) {
+        slideX.value = 0
+        runOnJS(finishTransition)(newView)
+      }
+    })
+  }
+
+  function renderBody(view: ActiveView) {
+    if (view.type === 'tag' && view.key === 'projects') {
+      return <ProjectsGrid onProjectPress={p => navigate({ type: 'project', project: p })} />
+    }
+    return <TagFeed links={linksForView(view)} />
+  }
+
+  const currentBodyStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: slideX.value }],
+  }))
+
+  const nextBodyStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: slideX.value + SCREEN_WIDTH }],
+  }))
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
-      <Header />
-      <TabBar activeKey={activeKey} onSelect={setActiveKey} />
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-      >
-        {activeKey === 'projects' ? <ProjectsGrid /> : <TagFeed links={feedLinks} />}
-      </ScrollView>
+      <Header project={activeProject} onBack={() => navigate({ type: 'tag', key: 'projects' })} />
+      <TabBar activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
+      <View style={styles.bodyContainer}>
+        <Animated.View style={[styles.bodySlot, currentBodyStyle]}>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+            {renderBody(bodyView)}
+          </ScrollView>
+        </Animated.View>
+        {nextBodyView && (
+          <Animated.View style={[StyleSheet.absoluteFill, nextBodyStyle]}>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+              {renderBody(nextBodyView)}
+            </ScrollView>
+          </Animated.View>
+        )}
+      </View>
       <FAB />
     </SafeAreaView>
   )
@@ -243,6 +345,9 @@ const styles = StyleSheet.create({
     fontFamily: FontFamily.serif,
     fontSize: 30,
     color: Colors.primary,
+    flex: 1,
+    textAlign: 'center',
+    paddingHorizontal: 8,
   },
   tabBarScroll: {
     flexGrow: 0,
@@ -269,6 +374,13 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.accent,
     borderRadius: 1,
     marginTop: 4,
+  },
+  bodyContainer: {
+    flex: 1,
+    overflow: 'hidden',
+  },
+  bodySlot: {
+    flex: 1,
   },
   scrollContent: {
     paddingBottom: 120,
@@ -375,25 +487,6 @@ const styles = StyleSheet.create({
   projectCollage: {
     borderRadius: 14,
     overflow: 'hidden',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    aspectRatio: 1,
-  },
-  projectThumb: {
-    width: '50%',
-    height: '50%',
-  },
-  projectEmpty: {
-    backgroundColor: '#D9D3C8',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  projectEmptyLabel: {
-    fontFamily: FontFamily.serif,
-    fontSize: 13,
-    color: Colors.primary,
-    textAlign: 'center',
-    padding: 8,
   },
   projectName: {
     fontFamily: FontFamily.serif,
