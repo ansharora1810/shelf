@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import {
   View,
   Text,
@@ -9,9 +9,7 @@ import {
 } from 'react-native'
 import Animated, {
   useSharedValue,
-  useAnimatedStyle,
   withTiming,
-  runOnJS,
   Easing,
 } from 'react-native-reanimated'
 import { SafeAreaView } from 'react-native-safe-area-context'
@@ -256,36 +254,59 @@ function linksForView(view: ActiveView): Link[] {
   return mockLinks.filter(l => l.tags.includes(view.key))
 }
 
+function viewOrder(view: ActiveView): number {
+  if (view.type === 'project') return TABS.findIndex(t => t.key === 'projects') + 0.5
+  return TABS.findIndex(t => t.key === view.key)
+}
+
+function viewKey(view: ActiveView): string {
+  return view.type === 'project' ? `project:${view.project.id}` : `tag:${view.key}`
+}
+
+const SLIDE_DURATION = 280
+
 export default function HomeScreen() {
   const [activeView, setActiveView] = useState<ActiveView>({ type: 'tag', key: 'all' })
-  const [bodyView, setBodyView] = useState<ActiveView>({ type: 'tag', key: 'all' })
-  const [nextBodyView, setNextBodyView] = useState<ActiveView | null>(null)
-  const slideX = useSharedValue(0)
-  const isAnimating = useRef(false)
+  const exitDir = useSharedValue(1)
+  const isFirstRender = useRef(true)
+
+  useEffect(() => {
+    isFirstRender.current = false
+  }, [])
 
   const activeTabKey = activeView.type === 'tag' ? activeView.key : 'projects'
   const activeProject = activeView.type === 'project' ? activeView.project : null
 
-  const finishTransition = useCallback((view: ActiveView) => {
-    setBodyView(view)
-    setNextBodyView(null)
-    isAnimating.current = false
-  }, [])
-
   function navigate(newView: ActiveView) {
+    if (viewKey(newView) === viewKey(activeView)) return
+    exitDir.value = viewOrder(newView) >= viewOrder(activeView) ? 1 : -1
     setActiveView(newView)
-    if (isAnimating.current) return
-    isAnimating.current = true
-    setNextBodyView(newView)
-    slideX.value = withTiming(-SCREEN_WIDTH, {
-      duration: 280,
-      easing: Easing.out(Easing.cubic),
-    }, finished => {
-      if (finished) {
-        slideX.value = 0
-        runOnJS(finishTransition)(newView)
-      }
-    })
+  }
+
+  const slideIn = (): any => {
+    'worklet'
+    const d = exitDir.value
+    return {
+      initialValues: { transform: [{ translateX: d * SCREEN_WIDTH }] },
+      animations: {
+        transform: [
+          { translateX: withTiming(0, { duration: SLIDE_DURATION, easing: Easing.out(Easing.cubic) }) },
+        ],
+      },
+    }
+  }
+
+  const slideOut = (): any => {
+    'worklet'
+    const d = exitDir.value
+    return {
+      initialValues: { transform: [{ translateX: 0 }] },
+      animations: {
+        transform: [
+          { translateX: withTiming(-d * SCREEN_WIDTH, { duration: SLIDE_DURATION, easing: Easing.out(Easing.cubic) }) },
+        ],
+      },
+    }
   }
 
   function renderBody(view: ActiveView) {
@@ -295,31 +316,21 @@ export default function HomeScreen() {
     return <TagFeed links={linksForView(view)} />
   }
 
-  const currentBodyStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: slideX.value }],
-  }))
-
-  const nextBodyStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: slideX.value + SCREEN_WIDTH }],
-  }))
-
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
       <Header project={activeProject} onBack={() => navigate({ type: 'tag', key: 'projects' })} />
       <TabBar activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
       <View style={styles.bodyContainer}>
-        <Animated.View style={[styles.bodySlot, currentBodyStyle]}>
+        <Animated.View
+          key={viewKey(activeView)}
+          entering={isFirstRender.current ? undefined : slideIn}
+          exiting={slideOut}
+          style={StyleSheet.absoluteFill}
+        >
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-            {renderBody(bodyView)}
+            {renderBody(activeView)}
           </ScrollView>
         </Animated.View>
-        {nextBodyView && (
-          <Animated.View style={[StyleSheet.absoluteFill, nextBodyStyle]}>
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-              {renderBody(nextBodyView)}
-            </ScrollView>
-          </Animated.View>
-        )}
       </View>
       <FAB />
     </SafeAreaView>
@@ -378,9 +389,6 @@ const styles = StyleSheet.create({
   bodyContainer: {
     flex: 1,
     overflow: 'hidden',
-  },
-  bodySlot: {
-    flex: 1,
   },
   scrollContent: {
     paddingBottom: 120,
