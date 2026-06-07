@@ -24,6 +24,8 @@ import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
 import { SpeedDialFab } from '../src/components/SpeedDialFab'
 import { NewProjectSheet } from '../src/components/NewProjectSheet'
 import { NewLinkSheet } from '../src/components/NewLinkSheet'
+import { EditProjectSheet } from '../src/components/EditProjectSheet'
+import { SettingsDrawer } from '../src/components/SettingsDrawer'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const CARD_WIDTH = (SCREEN_WIDTH - Spacing.screenH * 2) / 2.4
@@ -40,11 +42,21 @@ const TABS: Tab[] = [
   ...topTags.map(tag => ({ key: tag, label: tag.toUpperCase() })),
 ]
 
-type ActiveView = { type: 'tag'; key: string } | { type: 'project'; project: Project }
+type ActiveView = { type: 'tag'; key: string } | { type: 'project'; projectId: string }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function Header({ project, onBack }: { project: Project | null; onBack: () => void }) {
+function Header({
+  project,
+  onBack,
+  onEdit,
+  onMenu,
+}: {
+  project: Project | null
+  onBack: () => void
+  onEdit: () => void
+  onMenu: () => void
+}) {
   return (
     <View style={styles.header}>
       {project ? (
@@ -52,13 +64,15 @@ function Header({ project, onBack }: { project: Project | null; onBack: () => vo
           <Ionicons name="arrow-back" size={24} color={Colors.primary} />
         </Pressable>
       ) : (
-        <Ionicons name="menu" size={24} color={Colors.primary} />
+        <Pressable onPress={onMenu} hitSlop={8}>
+          <Ionicons name="menu" size={24} color={Colors.primary} />
+        </Pressable>
       )}
       <Text style={styles.headerTitle} adjustsFontSizeToFit numberOfLines={1}>
         {project ? project.name : 'Shelf'}
       </Text>
       {project ? (
-        <Pressable hitSlop={8}>
+        <Pressable onPress={onEdit} hitSlop={8}>
           <Ionicons name="create-outline" size={22} color={Colors.primary} />
         </Pressable>
       ) : (
@@ -248,7 +262,7 @@ function linksForView(
   allLinks: Link[],
   linksForProject: (projectId: string) => Link[],
 ): Link[] {
-  if (view.type === 'project') return linksForProject(view.project.id)
+  if (view.type === 'project') return linksForProject(view.projectId)
   if (view.key === 'all') return allLinks
   if (view.key === 'projects') return []
   return allLinks.filter(l => l.tags.includes(view.key))
@@ -260,7 +274,7 @@ function viewOrder(view: ActiveView): number {
 }
 
 function viewKey(view: ActiveView): string {
-  return view.type === 'project' ? `project:${view.project.id}` : `tag:${view.key}`
+  return view.type === 'project' ? `project:${view.projectId}` : `tag:${view.key}`
 }
 
 const SLIDE_DURATION = 280
@@ -270,6 +284,8 @@ export default function HomeScreen() {
   const { links, projects, getLinksForProject } = useShelf()
   const newProjectRef = useRef<BottomSheetModal>(null)
   const newLinkRef = useRef<BottomSheetModal>(null)
+  const editProjectRef = useRef<BottomSheetModal>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
   const exitDir = useSharedValue(1)
   const isFirstRender = useRef(true)
 
@@ -278,7 +294,8 @@ export default function HomeScreen() {
   }, [])
 
   const activeTabKey = activeView.type === 'tag' ? activeView.key : 'projects'
-  const activeProject = activeView.type === 'project' ? activeView.project : null
+  const activeProject =
+    activeView.type === 'project' ? projects.find(p => p.id === activeView.projectId) ?? null : null
 
   function navigate(newView: ActiveView) {
     if (viewKey(newView) === viewKey(activeView)) return
@@ -317,7 +334,7 @@ export default function HomeScreen() {
       return (
         <ProjectsGrid
           projects={projects}
-          onProjectPress={p => navigate({ type: 'project', project: p })}
+          onProjectPress={p => navigate({ type: 'project', projectId: p.id })}
         />
       )
     }
@@ -325,8 +342,14 @@ export default function HomeScreen() {
   }
 
   return (
+    <>
     <SafeAreaView style={styles.screen} edges={['top']}>
-      <Header project={activeProject} onBack={() => navigate({ type: 'tag', key: 'projects' })} />
+      <Header
+        project={activeProject}
+        onBack={() => navigate({ type: 'tag', key: 'projects' })}
+        onEdit={() => editProjectRef.current?.present()}
+        onMenu={() => setMenuOpen(true)}
+      />
       <TabBar activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
       <View style={styles.bodyContainer}>
         <Animated.View
@@ -346,7 +369,14 @@ export default function HomeScreen() {
       />
       <NewProjectSheet ref={newProjectRef} />
       <NewLinkSheet ref={newLinkRef} presetProjectId={activeProject?.id ?? null} />
+      <EditProjectSheet
+        ref={editProjectRef}
+        project={activeProject}
+        onDeleted={() => navigate({ type: 'tag', key: 'projects' })}
+      />
     </SafeAreaView>
+    <SettingsDrawer open={menuOpen} onClose={() => setMenuOpen(false)} />
+    </>
   )
 }
 
