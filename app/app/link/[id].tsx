@@ -8,7 +8,7 @@ import {
   Dimensions,
   StyleSheet,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
@@ -24,6 +24,7 @@ import { Colors, FontFamily, Spacing, Radius } from '../../src/constants/tokens'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const THUMBNAIL_HEIGHT = 280
+const PARALLAX_FACTOR = 0.2
 
 const SOURCE_ICONS: Record<string, 'logo-youtube' | 'logo-instagram' | 'globe-outline'> = {
   youtube: 'logo-youtube',
@@ -36,6 +37,7 @@ const AnimatedScrollView = Animated.createAnimatedComponent(ScrollView)
 export default function LinkDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const router = useRouter()
+  const insets = useSafeAreaInsets()
   const link = getLinkById(id)
 
   const scrollY = useSharedValue(0)
@@ -48,7 +50,12 @@ export default function LinkDetailScreen() {
   const thumbnailStyle = useAnimatedStyle(() => ({
     transform: [
       {
-        scale: interpolate(scrollY.value, [0, THUMBNAIL_HEIGHT], [1, 0.88], Extrapolation.CLAMP),
+        translateY: interpolate(
+          scrollY.value,
+          [0, THUMBNAIL_HEIGHT],
+          [0, -THUMBNAIL_HEIGHT * PARALLAX_FACTOR],
+          Extrapolation.CLAMP,
+        ),
       },
     ],
   }))
@@ -70,11 +77,16 @@ export default function LinkDetailScreen() {
   })()
 
   return (
-    <SafeAreaView style={styles.screen} edges={['top']}>
-      {/* Back button overlaid on thumbnail */}
-      <Pressable style={styles.backButton} onPress={() => router.back()}>
-        <Ionicons name="chevron-back" size={22} color={Colors.primary} />
-      </Pressable>
+    <View style={styles.screen}>
+      {/* Parallax thumbnail — pinned behind the content, which scrolls up over it */}
+      <Animated.View style={[styles.thumbnailWrap, thumbnailStyle as object]}>
+        <Image
+          source={{ uri: link.thumbnail }}
+          style={styles.thumbnail}
+          contentFit="cover"
+          transition={200}
+        />
+      </Animated.View>
 
       <AnimatedScrollView
         showsVerticalScrollIndicator={false}
@@ -82,16 +94,6 @@ export default function LinkDetailScreen() {
         scrollEventThrottle={16}
         contentContainerStyle={styles.scrollContent}
       >
-        {/* Parallax thumbnail */}
-        <Animated.View style={[styles.thumbnailWrap, thumbnailStyle as object]}>
-          <Image
-            source={{ uri: link.thumbnail }}
-            style={styles.thumbnail}
-            contentFit="cover"
-            transition={200}
-          />
-        </Animated.View>
-
         {/* Body */}
         <View style={styles.body}>
           {/* Title */}
@@ -134,6 +136,11 @@ export default function LinkDetailScreen() {
         </View>
       </AnimatedScrollView>
 
+      {/* Back button — overlays the thumbnail */}
+      <Pressable style={[styles.backButton, { top: insets.top + 8 }]} onPress={() => router.back()}>
+        <Ionicons name="chevron-back" size={22} color={Colors.primary} />
+      </Pressable>
+
       {/* Footer */}
       <View style={styles.footer}>
         <Pressable style={styles.openButton}>
@@ -144,7 +151,7 @@ export default function LinkDetailScreen() {
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>
-    </SafeAreaView>
+    </View>
   )
 }
 
@@ -162,7 +169,6 @@ const styles = StyleSheet.create({
   },
   backButton: {
     position: 'absolute',
-    top: 56,
     left: 16,
     zIndex: 10,
     width: 36,
@@ -173,9 +179,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   scrollContent: {
+    paddingTop: THUMBNAIL_HEIGHT,
     paddingBottom: 160,
   },
   thumbnailWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
     width: SCREEN_WIDTH,
     height: THUMBNAIL_HEIGHT,
   },
@@ -184,6 +194,7 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   body: {
+    backgroundColor: Colors.background,
     paddingHorizontal: Spacing.screenH,
     paddingTop: 24,
     gap: 16,
