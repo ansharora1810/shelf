@@ -3,6 +3,7 @@ import HomeScreen from './screens/HomeScreen'
 import ProjectsScreen from './screens/ProjectsScreen'
 import LinkDetailScreen from './screens/LinkDetailScreen'
 import PostProcessingScreen from './screens/PostProcessingScreen'
+import ProjectDetailScreen from './screens/ProjectDetailScreen'
 
 function PhoneFrame({ children, label }) {
   return (
@@ -38,10 +39,11 @@ function PhoneFrame({ children, label }) {
 }
 
 const SCREENS = [
-  { key: 'home',     Screen: HomeScreen,           label: 'Home — #all feed' },
-  { key: 'projects', Screen: ProjectsScreen,        label: 'Projects — Plan tab' },
-  { key: 'detail',   Screen: LinkDetailScreen,      label: 'Link Detail' },
-  { key: 'add',      Screen: PostProcessingScreen,  label: 'Add Link — Post-processing' },
+  { key: 'home',           Screen: HomeScreen,           label: 'Home — #all feed' },
+  { key: 'projects',       Screen: ProjectsScreen,       label: 'Projects — grid' },
+  { key: 'project-detail', Screen: ProjectDetailScreen,  label: 'Project detail' },
+  { key: 'detail',         Screen: LinkDetailScreen,     label: 'Link Detail' },
+  { key: 'add',            Screen: PostProcessingScreen, label: 'Add Link — Post-processing' },
 ]
 
 export default function App() {

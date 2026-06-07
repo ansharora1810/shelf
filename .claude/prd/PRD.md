@@ -203,8 +203,10 @@ Triggered after loading spinner (share extension or manual add). Slides up as an
 Tap `+` on home → bottom sheet slides up:
 - Drag handle at top
 - "New project" label
-- Single text input (auto-focused, keyboard appears)
+- Single text input (auto-focused, keyboard appears) — **20 character limit**
 - "Create" button (disabled until name is entered)
+
+Project name is stored and displayed in title case (e.g. "app launch ideas" → "App Launch Ideas").
 
 Project thumbnail auto-generates as links are added (2×2 collage of first 4 link thumbnails, fallback warm gradient + name).
 
@@ -229,6 +231,39 @@ Bookmark icon in a circle + "Nothing saved yet" + "Share any link to Shelf from 
 
 **Empty project:**
 "No links in this project yet." + add link button.
+
+---
+
+### 6.9 Project detail
+
+Triggered by tapping a project card from the Projects tab.
+
+**Header:**
+- `←` back arrow — far left
+- Project name — centred (replaces "Shelf" logo), displayed in title case
+- Font size shrinks to fit on a single line for longer names (max 20 chars)
+- `🔍` search icon + `✏️` pencil icon — far right (search left of pencil)
+
+**Search:** Scoped to this project's links only.
+
+**Tab bar:** Same horizontal scroll tag bar as home. Tapping a tag navigates to the global tag view for that tag (not filtered within the project).
+
+**Body:**
+- Links in this project grouped by week in descending order
+- Same 2.5-column horizontal scroll rows as the tag feed
+- Same card format: thumbnail + time badge + colour-split title
+
+**FAB:** `+` bottom right — opens manual add flow with this project pre-selected.
+
+**Edit / delete (pencil icon):**
+Opens a bottom sheet (same pattern as create project):
+- Drag handle at top
+- "Edit project" label
+- Rename text input (pre-filled with current name)
+- "Save" button
+- Red "Delete project" option below Save
+
+**Empty state:** "No links in this project yet." + add link prompt.
 
 ---
 
@@ -365,6 +400,10 @@ flowchart LR
 - Sidebar drawer (left): account, subscription, notifications, about
 - Create project: `+` on home → bottom sheet → name → Create
 - Tab switch: swipe or tap
+- Project detail header: `←` (left) | project name (centre) | `🔍` + `✏️` (right)
+- Project detail tab bar: same global tabs — tapping a tag navigates to global tag view
+- Project detail search: scoped to this project's links only
+- Edit/delete project: pencil icon → bottom sheet with rename input + red Delete option
 
 ### Post-processing overlay
 - Slides up after loading spinner
@@ -392,4 +431,21 @@ flowchart LR
 
 ### Design
 - Warm, light, spacious. Breathing room on every screen.
-- Micro-interactions: bouncy scroll bar (projects view), parallax thumbnail (link detail), bottom sheet slide-up (create project + post-processing overlay)
+- Micro-interactions: bouncy scroll bar (projects view), parallax thumbnail (link detail), bottom sheet slide-up (create project + post-processing overlay + edit project)
+
+### API surface
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/links` | Load all links on open |
+| GET | `/projects` | Load all projects on open (catches empty projects) |
+| POST | `/links` | Upsert link — create (no id) or update (id present) |
+| POST | `/projects` | Upsert project — create (no id) or update (id present) |
+| DELETE | `/links/:id` | Delete a link |
+| DELETE | `/projects/:id` | Delete a project |
+
+**Frontend data strategy:**
+- Both GET endpoints fire in parallel on app open
+- All links loaded in full (no partial fields) — ~150KB at 100 links, trivially small
+- Tag filtering, top-5 tag computation, and project membership all derived client-side
+- No pagination in v1; add cursor-based pagination if per-user link count grows past ~500

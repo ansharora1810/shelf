@@ -84,12 +84,21 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 - Right: `{n} SAVED >` in `accent` (Inter 11px uppercase)
 - Tapping right label navigates to full list
 
-### Bottom sheet (create project, post-processing overlay)
+### Project detail header
+
+Replaces the standard home header when inside a project:
+
+- Left: `←` back arrow
+- Centre: project name in Playfair Display 30px `primary`
+- Right: search icon + pencil icon (search left of pencil), gap `16px` between them
+
+### Bottom sheet (create project, edit project, post-processing overlay)
 
 - Library: `@gorhom/bottom-sheet`
 - Background: `surface` (`#FFFFFF`)
 - Drag handle: centered, `#DEDEDE`, `40×4px`, `borderRadius: 2`
 - On iOS 26+: `GlassContainer` from `expo-glass-effect` as the sheet background
+- Edit project sheet: rename input (pre-filled) + "Save" button + "Delete project" in `#C0392B` below
 
 ---
 
