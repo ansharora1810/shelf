@@ -16,10 +16,14 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
+import type { BottomSheetModal } from '@gorhom/bottom-sheet'
 import { mockLinks, getTopTags, groupLinksByWeek } from '../src/data/mock'
 import { useShelf } from '../src/store/shelf'
 import { Link, Project } from '../src/types'
 import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
+import { SpeedDialFab } from '../src/components/SpeedDialFab'
+import { NewProjectSheet } from '../src/components/NewProjectSheet'
+import { NewLinkSheet } from '../src/components/NewLinkSheet'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const CARD_WIDTH = (SCREEN_WIDTH - Spacing.screenH * 2) / 2.4
@@ -105,10 +109,10 @@ function LinkCard({ link }: { link: Link }) {
           contentFit="cover"
           transition={200}
         />
-        <DurationBadge duration={link.duration} />
+        {link.duration ? <DurationBadge duration={link.duration} /> : null}
       </View>
       <Text style={styles.cardTitle} numberOfLines={3}>
-        <Text style={styles.cardDescriptor}>{link.descriptor} </Text>
+        {link.descriptor ? <Text style={styles.cardDescriptor}>{link.descriptor} </Text> : null}
         <Text style={styles.cardTitleMain}>{link.title}</Text>
       </Text>
     </Pressable>
@@ -237,16 +241,6 @@ function ProjectsGrid({
   )
 }
 
-function FAB() {
-  return (
-    <View style={styles.fab} pointerEvents="box-none">
-      <Pressable style={styles.fabButton}>
-        <Ionicons name="add" size={26} color={Colors.primary} />
-      </Pressable>
-    </View>
-  )
-}
-
 // ─── Screen ──────────────────────────────────────────────────────────────────
 
 function linksForView(
@@ -274,6 +268,8 @@ const SLIDE_DURATION = 280
 export default function HomeScreen() {
   const [activeView, setActiveView] = useState<ActiveView>({ type: 'tag', key: 'all' })
   const { links, projects, getLinksForProject } = useShelf()
+  const newProjectRef = useRef<BottomSheetModal>(null)
+  const newLinkRef = useRef<BottomSheetModal>(null)
   const exitDir = useSharedValue(1)
   const isFirstRender = useRef(true)
 
@@ -344,7 +340,12 @@ export default function HomeScreen() {
           </ScrollView>
         </Animated.View>
       </View>
-      <FAB />
+      <SpeedDialFab
+        onNewProject={() => newProjectRef.current?.present()}
+        onNewLink={() => newLinkRef.current?.present()}
+      />
+      <NewProjectSheet ref={newProjectRef} />
+      <NewLinkSheet ref={newLinkRef} presetProjectId={activeProject?.id ?? null} />
     </SafeAreaView>
   )
 }
@@ -519,26 +520,5 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: Colors.textSecondary,
     marginTop: 2,
-  },
-  fab: {
-    position: 'absolute',
-    bottom: 36,
-    right: 20,
-    alignItems: 'flex-end',
-  },
-  fabButton: {
-    width: 56,
-    height: 56,
-    borderRadius: Radius.pill,
-    backgroundColor: 'rgba(255,255,255,0.72)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.8)',
   },
 })
