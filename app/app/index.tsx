@@ -71,19 +71,21 @@ function Header({
 }) {
   return (
     <View style={styles.header}>
-      {project ? (
-        <Pressable onPress={onBack} hitSlop={8}>
-          <Ionicons name="arrow-back" size={24} color={Colors.primary} />
-        </Pressable>
-      ) : (
-        <Pressable onPress={onMenu} hitSlop={8}>
-          <Ionicons name="menu" size={24} color={Colors.primary} />
-        </Pressable>
-      )}
+      <View style={styles.headerSide}>
+        {project ? (
+          <Pressable onPress={onBack} hitSlop={8}>
+            <Ionicons name="arrow-back" size={24} color={Colors.primary} />
+          </Pressable>
+        ) : (
+          <Pressable onPress={onMenu} hitSlop={8}>
+            <Ionicons name="menu" size={24} color={Colors.primary} />
+          </Pressable>
+        )}
+      </View>
       <Text style={styles.headerTitle} adjustsFontSizeToFit numberOfLines={1}>
         {project ? project.name : 'Shelf'}
       </Text>
-      <View style={styles.headerRight}>
+      <View style={[styles.headerSide, styles.headerSideRight]}>
         {project ? (
           <Pressable onPress={onEdit} hitSlop={8}>
             <Ionicons name="create-outline" size={22} color={Colors.primary} />
@@ -458,7 +460,6 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     paddingHorizontal: Spacing.screenH,
     height: 64,
   },
@@ -470,9 +471,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 8,
   },
-  headerRight: {
+  headerSide: {
+    width: 64,
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  headerSideRight: {
+    justifyContent: 'flex-end',
     gap: 16,
   },
   tabBarScroll: {
