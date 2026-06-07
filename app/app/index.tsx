@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import {
   View,
   Text,
@@ -26,9 +26,13 @@ import { NewProjectSheet } from '../src/components/NewProjectSheet'
 import { NewLinkSheet } from '../src/components/NewLinkSheet'
 import { EditProjectSheet } from '../src/components/EditProjectSheet'
 import { SettingsDrawer } from '../src/components/SettingsDrawer'
+import { CalendarSheet } from '../src/components/CalendarSheet'
+import { dayKey, formatDayHeading } from '../src/data/dates'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const CARD_WIDTH = (SCREEN_WIDTH - Spacing.screenH * 2) / 2.4
+const DATE_GRID_GAP = 12
+const DATE_CARD_WIDTH = CARD_WIDTH
 // Projects grid: 20px padding each side, 16px gap between columns
 const PROJECT_CARD_WIDTH = Math.floor((SCREEN_WIDTH - Spacing.screenH * 2 - 16) / 2)
 const PROJECT_THUMB_SIZE = Math.floor(PROJECT_CARD_WIDTH / 2)
@@ -52,12 +56,18 @@ function Header({
   onEdit,
   onMenu,
   onSearch,
+  onCalendar,
+  showCalendar,
+  dateActive,
 }: {
   project: Project | null
   onBack: () => void
   onEdit: () => void
   onMenu: () => void
   onSearch: () => void
+  onCalendar: () => void
+  showCalendar: boolean
+  dateActive: boolean
 }) {
   return (
     <View style={styles.header}>
@@ -73,15 +83,26 @@ function Header({
       <Text style={styles.headerTitle} adjustsFontSizeToFit numberOfLines={1}>
         {project ? project.name : 'Shelf'}
       </Text>
-      {project ? (
-        <Pressable onPress={onEdit} hitSlop={8}>
-          <Ionicons name="create-outline" size={22} color={Colors.primary} />
-        </Pressable>
-      ) : (
-        <Pressable onPress={onSearch} hitSlop={8}>
-          <Ionicons name="search" size={22} color={Colors.primary} />
-        </Pressable>
-      )}
+      <View style={styles.headerRight}>
+        {project ? (
+          <Pressable onPress={onEdit} hitSlop={8}>
+            <Ionicons name="create-outline" size={22} color={Colors.primary} />
+          </Pressable>
+        ) : (
+          <Pressable onPress={onSearch} hitSlop={8}>
+            <Ionicons name="search" size={22} color={Colors.primary} />
+          </Pressable>
+        )}
+        {showCalendar ? (
+          <Pressable onPress={onCalendar} hitSlop={8}>
+            <Ionicons
+              name={dateActive ? 'calendar' : 'calendar-outline'}
+              size={22}
+              color={dateActive ? Colors.accent : Colors.primary}
+            />
+          </Pressable>
+        ) : null}
+      </View>
     </View>
   )
 }
@@ -116,14 +137,14 @@ function DurationBadge({ duration }: { duration: string }) {
   )
 }
 
-function LinkCard({ link }: { link: Link }) {
+function LinkCard({ link, width = CARD_WIDTH }: { link: Link; width?: number }) {
   const router = useRouter()
   return (
-    <Pressable style={styles.card} onPress={() => router.push(`/link/${link.id}`)}>
+    <Pressable style={{ width }} onPress={() => router.push(`/link/${link.id}`)}>
       <View style={styles.cardImageWrap}>
         <Image
           source={{ uri: link.thumbnail }}
-          style={styles.cardImage}
+          style={[styles.cardImage, { width, height: width }]}
           contentFit="cover"
           transition={200}
         />
@@ -177,6 +198,26 @@ function TagFeed({ links }: { links: Link[] }) {
         </View>
       ))}
     </>
+  )
+}
+
+function DateGrid({ date, links }: { date: string; links: Link[] }) {
+  return (
+    <View style={styles.dateSection}>
+      <Text style={styles.dateHeading}>{formatDayHeading(date)}</Text>
+      {links.length === 0 ? (
+        <View style={styles.empty}>
+          <Ionicons name="calendar-outline" size={36} color={Colors.textSecondary} />
+          <Text style={styles.emptyText}>Nothing saved on this day</Text>
+        </View>
+      ) : (
+        <View style={styles.dateGrid}>
+          {links.map(link => (
+            <LinkCard key={link.id} link={link} width={DATE_CARD_WIDTH} />
+          ))}
+        </View>
+      )}
+    </View>
   )
 }
 
@@ -290,7 +331,9 @@ export default function HomeScreen() {
   const newProjectRef = useRef<BottomSheetModal>(null)
   const newLinkRef = useRef<BottomSheetModal>(null)
   const editProjectRef = useRef<BottomSheetModal>(null)
+  const calendarRef = useRef<BottomSheetModal>(null)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [activeDate, setActiveDate] = useState<string | null>(null)
   const exitDir = useSharedValue(1)
   const isFirstRender = useRef(true)
 
@@ -301,6 +344,12 @@ export default function HomeScreen() {
   const activeTabKey = activeView.type === 'tag' ? activeView.key : 'projects'
   const activeProject =
     activeView.type === 'project' ? projects.find(p => p.id === activeView.projectId) ?? null : null
+  const showCalendar = !(activeView.type === 'tag' && activeView.key === 'projects')
+  const markedDays = useMemo(() => {
+    const days = new Set<string>()
+    for (const link of linksForView(activeView, links, getLinksForProject)) days.add(dayKey(link.savedAt))
+    return days
+  }, [activeView, links, getLinksForProject])
 
   function navigate(newView: ActiveView) {
     if (viewKey(newView) === viewKey(activeView)) return
@@ -343,7 +392,11 @@ export default function HomeScreen() {
         />
       )
     }
-    return <TagFeed links={linksForView(view, links, getLinksForProject)} />
+    const viewLinks = linksForView(view, links, getLinksForProject)
+    if (activeDate) {
+      return <DateGrid date={activeDate} links={viewLinks.filter(l => dayKey(l.savedAt) === activeDate)} />
+    }
+    return <TagFeed links={viewLinks} />
   }
 
   return (
@@ -355,6 +408,9 @@ export default function HomeScreen() {
         onEdit={() => editProjectRef.current?.present()}
         onMenu={() => setMenuOpen(true)}
         onSearch={() => router.push('/search')}
+        onCalendar={() => (activeDate ? setActiveDate(null) : calendarRef.current?.present())}
+        showCalendar={showCalendar}
+        dateActive={activeDate !== null}
       />
       <TabBar activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
       <View style={styles.bodyContainer}>
@@ -380,6 +436,12 @@ export default function HomeScreen() {
         project={activeProject}
         onDeleted={() => navigate({ type: 'tag', key: 'projects' })}
       />
+      <CalendarSheet
+        ref={calendarRef}
+        activeDate={activeDate}
+        markedDays={markedDays}
+        onSelect={setActiveDate}
+      />
     </SafeAreaView>
     <SettingsDrawer open={menuOpen} onClose={() => setMenuOpen(false)} />
     </>
@@ -398,8 +460,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.screenH,
-    paddingTop: 10,
-    paddingBottom: 14,
+    height: 64,
   },
   headerTitle: {
     fontFamily: FontFamily.serif,
@@ -408,6 +469,11 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
     paddingHorizontal: 8,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
   },
   tabBarScroll: {
     flexGrow: 0,
@@ -445,6 +511,20 @@ const styles = StyleSheet.create({
   weekSection: {
     marginBottom: Spacing.sectionGap,
   },
+  dateSection: {
+    paddingHorizontal: Spacing.screenH,
+  },
+  dateHeading: {
+    fontFamily: FontFamily.serif,
+    fontSize: 22,
+    color: Colors.primary,
+    marginBottom: 16,
+  },
+  dateGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: DATE_GRID_GAP,
+  },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'baseline',
@@ -468,15 +548,10 @@ const styles = StyleSheet.create({
     paddingLeft: Spacing.screenH,
     gap: Spacing.cardGap,
   },
-  card: {
-    width: CARD_WIDTH,
-  },
   cardImageWrap: {
     position: 'relative',
   },
   cardImage: {
-    width: CARD_WIDTH,
-    height: CARD_WIDTH,
     borderRadius: Radius.card,
   },
   badge: {
