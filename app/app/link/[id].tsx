@@ -7,7 +7,9 @@ import {
   Switch,
   Dimensions,
   StyleSheet,
+  Alert,
 } from 'react-native'
+import * as Linking from 'expo-linking'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import { useLocalSearchParams, useRouter } from 'expo-router'
@@ -19,7 +21,7 @@ import Animated, {
   interpolate,
   Extrapolation,
 } from 'react-native-reanimated'
-import { getLinkById } from '../../src/data/mock'
+import { useShelf } from '../../src/store/shelf'
 import { Colors, FontFamily, Spacing, Radius } from '../../src/constants/tokens'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
@@ -38,6 +40,7 @@ export default function LinkDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const router = useRouter()
   const insets = useSafeAreaInsets()
+  const { getLinkById, deleteLink } = useShelf()
   const link = getLinkById(id)
 
   const scrollY = useSharedValue(0)
@@ -75,6 +78,22 @@ export default function LinkDetailScreen() {
       return link.url
     }
   })()
+
+  const openOriginal = () => Linking.openURL(link.url)
+
+  const confirmDelete = () => {
+    Alert.alert('Delete link?', 'This removes it from your shelf and cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          deleteLink(link.id)
+          router.back()
+        },
+      },
+    ])
+  }
 
   return (
     <View style={styles.screen}>
@@ -143,11 +162,11 @@ export default function LinkDetailScreen() {
 
       {/* Footer */}
       <View style={styles.footer}>
-        <Pressable style={styles.openButton}>
+        <Pressable style={styles.openButton} onPress={openOriginal}>
           <Text style={styles.openButtonText}>Open link</Text>
           <Ionicons name="arrow-forward" size={16} color={Colors.surface} />
         </Pressable>
-        <Pressable style={styles.deleteButton}>
+        <Pressable style={styles.deleteButton} onPress={confirmDelete}>
           <Text style={styles.deleteButtonText}>Delete</Text>
         </Pressable>
       </View>

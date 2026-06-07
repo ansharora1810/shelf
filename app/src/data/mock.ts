@@ -229,21 +229,9 @@ export const mockProjects: Project[] = [
   { id: '4', name: 'Home Renovation For Faridabad Haryana India', linkCount: 1 },
 ]
 
-export function getProjectById(id: string): Project | undefined {
-  return mockProjects.find(p => p.id === id)
-}
-
-export function getLinkById(id: string): Link | undefined {
-  return mockLinks.find(l => l.id === id)
-}
-
-export function getLinksForProject(projectId: string): Link[] {
-  return mockLinks.filter(l => l.projectId === projectId)
-}
-
-export function getTopTags(count: number): string[] {
+export function getTopTags(links: Link[], count: number): string[] {
   const freq: Record<string, number> = {}
-  for (const link of mockLinks) {
+  for (const link of links) {
     for (const tag of link.tags) {
       freq[tag] = (freq[tag] ?? 0) + 1
     }

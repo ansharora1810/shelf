@@ -16,13 +16,8 @@ import { SafeAreaView } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
-import {
-  mockLinks,
-  mockProjects,
-  getTopTags,
-  groupLinksByWeek,
-  getLinksForProject,
-} from '../src/data/mock'
+import { mockLinks, getTopTags, groupLinksByWeek } from '../src/data/mock'
+import { useShelf } from '../src/store/shelf'
 import { Link, Project } from '../src/types'
 import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
 
@@ -32,7 +27,7 @@ const CARD_WIDTH = (SCREEN_WIDTH - Spacing.screenH * 2) / 2.4
 const PROJECT_CARD_WIDTH = Math.floor((SCREEN_WIDTH - Spacing.screenH * 2 - 16) / 2)
 const PROJECT_THUMB_SIZE = Math.floor(PROJECT_CARD_WIDTH / 2)
 
-const topTags = getTopTags(5)
+const topTags = getTopTags(mockLinks, 5)
 
 type Tab = { key: string; label: string }
 const TABS: Tab[] = [
@@ -164,6 +159,7 @@ function TagFeed({ links }: { links: Link[] }) {
 }
 
 function ProjectCollage({ project, onPress }: { project: Project; onPress: () => void }) {
+  const { getLinksForProject } = useShelf()
   const links = getLinksForProject(project.id)
   const thumbnails = links.slice(0, 4).map(l => l.thumbnail)
   const size = PROJECT_CARD_WIDTH
@@ -216,10 +212,16 @@ function ProjectCollage({ project, onPress }: { project: Project; onPress: () =>
   )
 }
 
-function ProjectsGrid({ onProjectPress }: { onProjectPress: (p: Project) => void }) {
+function ProjectsGrid({
+  projects,
+  onProjectPress,
+}: {
+  projects: Project[]
+  onProjectPress: (p: Project) => void
+}) {
   const pairs: Project[][] = []
-  for (let i = 0; i < mockProjects.length; i += 2) {
-    pairs.push(mockProjects.slice(i, i + 2))
+  for (let i = 0; i < projects.length; i += 2) {
+    pairs.push(projects.slice(i, i + 2))
   }
   return (
     <View style={styles.projectsGrid}>
@@ -247,11 +249,15 @@ function FAB() {
 
 // ─── Screen ──────────────────────────────────────────────────────────────────
 
-function linksForView(view: ActiveView): Link[] {
-  if (view.type === 'project') return getLinksForProject(view.project.id)
-  if (view.key === 'all') return mockLinks
+function linksForView(
+  view: ActiveView,
+  allLinks: Link[],
+  linksForProject: (projectId: string) => Link[],
+): Link[] {
+  if (view.type === 'project') return linksForProject(view.project.id)
+  if (view.key === 'all') return allLinks
   if (view.key === 'projects') return []
-  return mockLinks.filter(l => l.tags.includes(view.key))
+  return allLinks.filter(l => l.tags.includes(view.key))
 }
 
 function viewOrder(view: ActiveView): number {
@@ -267,6 +273,7 @@ const SLIDE_DURATION = 280
 
 export default function HomeScreen() {
   const [activeView, setActiveView] = useState<ActiveView>({ type: 'tag', key: 'all' })
+  const { links, projects, getLinksForProject } = useShelf()
   const exitDir = useSharedValue(1)
   const isFirstRender = useRef(true)
 
@@ -311,9 +318,14 @@ export default function HomeScreen() {
 
   function renderBody(view: ActiveView) {
     if (view.type === 'tag' && view.key === 'projects') {
-      return <ProjectsGrid onProjectPress={p => navigate({ type: 'project', project: p })} />
+      return (
+        <ProjectsGrid
+          projects={projects}
+          onProjectPress={p => navigate({ type: 'project', project: p })}
+        />
+      )
     }
-    return <TagFeed links={linksForView(view)} />
+    return <TagFeed links={linksForView(view, links, getLinksForProject)} />
   }
 
   return (
