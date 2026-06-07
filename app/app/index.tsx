@@ -51,11 +51,13 @@ function Header({
   onBack,
   onEdit,
   onMenu,
+  onSearch,
 }: {
   project: Project | null
   onBack: () => void
   onEdit: () => void
   onMenu: () => void
+  onSearch: () => void
 }) {
   return (
     <View style={styles.header}>
@@ -76,7 +78,9 @@ function Header({
           <Ionicons name="create-outline" size={22} color={Colors.primary} />
         </Pressable>
       ) : (
-        <Ionicons name="search" size={22} color={Colors.primary} />
+        <Pressable onPress={onSearch} hitSlop={8}>
+          <Ionicons name="search" size={22} color={Colors.primary} />
+        </Pressable>
       )}
     </View>
   )
@@ -281,6 +285,7 @@ const SLIDE_DURATION = 280
 
 export default function HomeScreen() {
   const [activeView, setActiveView] = useState<ActiveView>({ type: 'tag', key: 'all' })
+  const router = useRouter()
   const { links, projects, getLinksForProject } = useShelf()
   const newProjectRef = useRef<BottomSheetModal>(null)
   const newLinkRef = useRef<BottomSheetModal>(null)
@@ -349,6 +354,7 @@ export default function HomeScreen() {
         onBack={() => navigate({ type: 'tag', key: 'projects' })}
         onEdit={() => editProjectRef.current?.present()}
         onMenu={() => setMenuOpen(true)}
+        onSearch={() => router.push('/search')}
       />
       <TabBar activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
       <View style={styles.bodyContainer}>
