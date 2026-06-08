@@ -1,10 +1,26 @@
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useState } from 'react'
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Ionicons } from '@expo/vector-icons'
+import { useAuth } from '../src/store/auth'
 import { Colors, FontFamily, Spacing } from '../src/constants/tokens'
 
 export default function LoginScreen() {
-  const notWired = () => Alert.alert('Coming soon', 'Sign-in is wired up in the next step.')
+  const { signInWithGoogle, signInWithApple } = useAuth()
+  const [busy, setBusy] = useState<'idle' | 'google' | 'apple'>('idle')
+
+  const handleSignIn = async (provider: 'google' | 'apple') => {
+    if (busy !== 'idle') return
+    setBusy(provider)
+    try {
+      if (provider === 'google') await signInWithGoogle()
+      else await signInWithApple()
+    } catch (err: unknown) {
+      Alert.alert('Sign in failed', err instanceof Error ? err.message : 'Something went wrong')
+    } finally {
+      setBusy('idle')
+    }
+  }
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -17,8 +33,22 @@ export default function LoginScreen() {
       </View>
 
       <View style={styles.footer}>
-        <AuthButton icon="logo-google" label="Continue with Google" onPress={notWired} variant="light" />
-        <AuthButton icon="logo-apple" label="Continue with Apple" onPress={notWired} variant="dark" />
+        <AuthButton
+          icon="logo-google"
+          label="Continue with Google"
+          onPress={() => handleSignIn('google')}
+          loading={busy === 'google'}
+          disabled={busy !== 'idle'}
+          variant="light"
+        />
+        <AuthButton
+          icon="logo-apple"
+          label="Continue with Apple"
+          onPress={() => handleSignIn('apple')}
+          loading={busy === 'apple'}
+          disabled={busy !== 'idle'}
+          variant="dark"
+        />
         <Text style={styles.legal}>By continuing, you agree to our Terms & Privacy Policy.</Text>
       </View>
     </SafeAreaView>
@@ -29,15 +59,27 @@ type AuthButtonProps = {
   icon: 'logo-google' | 'logo-apple'
   label: string
   onPress: () => void
+  loading: boolean
+  disabled: boolean
   variant: 'light' | 'dark'
 }
 
-function AuthButton({ icon, label, onPress, variant }: AuthButtonProps) {
+function AuthButton({ icon, label, onPress, loading, disabled, variant }: AuthButtonProps) {
   const isDark = variant === 'dark'
   return (
-    <Pressable style={[styles.authBtn, isDark && styles.authBtnDark]} onPress={onPress}>
-      <Ionicons name={icon} size={20} color={isDark ? Colors.surface : Colors.primary} />
-      <Text style={[styles.authBtnLabel, isDark && styles.authBtnLabelDark]}>{label}</Text>
+    <Pressable
+      style={[styles.authBtn, isDark && styles.authBtnDark, disabled && styles.authBtnDisabled]}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      {loading ? (
+        <ActivityIndicator color={isDark ? Colors.surface : Colors.primary} />
+      ) : (
+        <>
+          <Ionicons name={icon} size={20} color={isDark ? Colors.surface : Colors.primary} />
+          <Text style={[styles.authBtnLabel, isDark && styles.authBtnLabelDark]}>{label}</Text>
+        </>
+      )}
     </Pressable>
   )
 }
@@ -93,6 +135,9 @@ const styles = StyleSheet.create({
   authBtnDark: {
     backgroundColor: Colors.primary,
     borderWidth: 0,
+  },
+  authBtnDisabled: {
+    opacity: 0.5,
   },
   authBtnLabel: {
     fontFamily: FontFamily.sansMedium,

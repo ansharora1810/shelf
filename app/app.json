@@ -22,7 +22,8 @@
       "expo-router",
       "expo-font",
       "expo-image",
-      "expo-sqlite"
+      "expo-sqlite",
+      "expo-web-browser"
     ]
   }
 }
