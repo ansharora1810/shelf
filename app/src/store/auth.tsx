@@ -17,9 +17,10 @@ type AuthCtx = {
 const Ctx = createContext<AuthCtx | null>(null)
 
 async function exchangeFromUrl(url: string) {
-  const parsed = new URL(url)
-  const code = parsed.searchParams.get('code')
-  if (code) await supabase.auth.exchangeCodeForSession(code)
+  const code = new URL(url).searchParams.get('code')
+  if (!code) throw new Error('No authorization code in redirect URL')
+  const { error } = await supabase.auth.exchangeCodeForSession(code)
+  if (error) throw error
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -45,7 +46,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     })
     if (error || !data.url) throw error ?? new Error('No auth URL returned')
     const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo)
-    if (result.type === 'success') await exchangeFromUrl(result.url)
+    if (result.type !== 'success') throw new Error(`Auth session ${result.type}`)
+    await exchangeFromUrl(result.url)
   }
 
   return (

@@ -23,14 +23,13 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 
 | Role | Typeface | Weight | Size | Case |
 |---|---|---|---|---|
-| Screen title (e.g. "Shelf") | Playfair Display | Regular (400) | 34px | Sentence |
+| Screen title (e.g. "Shelf") | Playfair Display | Regular (400) | 30px | Sentence |
 | Section header (e.g. "Recent") | Playfair Display | Regular (400) | 22px | Sentence |
-| Card title — descriptor word | Playfair Display | Regular (400) | 15px | Sentence |
-| Card title — main words | Playfair Display | Regular (400) | 15px | Sentence |
+| Card title — descriptor word | Playfair Display | Regular (400) | 13px | Sentence |
+| Card title — main words | Playfair Display | Regular (400) | 13px | Sentence |
 | Tab label | Inter | Medium (500) | 11px | Upper |
 | Count / metadata (e.g. "20 SAVED") | Inter | Medium (500) | 11px | Upper |
-| Badge label (e.g. "40m") | Inter | Regular (400) | 11px | — |
-| Bottom nav label | Inter | Regular (400) | 10px | Sentence |
+| Badge label (e.g. "40m") | Inter | Regular (400) | 10px | — |
 
 **Card title colour split:** the descriptor/tag word(s) render in `accent`, the remainder in `primary`. This requires the AI to return title parts in a structured format — e.g. `{ descriptor: "high-protein", title: "pav bhaji" }`.
 
@@ -47,22 +46,11 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 | `section-gap` | `28px` | Vertical space between section groups |
 | `section-header-mb` | `12px` | Below section header, above cards |
 | `card-radius` | `12px` | Image card border radius |
-| `pill-radius` | `999px` | Nav bar, badges, tag chips |
-| `bottom-nav-height` | `80px` | Floating nav bar height |
-| `bottom-nav-h-padding`| `12px` | Inner horizontal padding of nav bar |
+| `pill-radius` | `999px` | Badges, tag chips |
 
 ---
 
 ## Component specs
-
-### Floating bottom nav bar
-
-- White pill (`surface`) floating above background, not full-width
-- `marginHorizontal: 24`, `borderRadius: 999`, `paddingHorizontal: 12`
-- Shadow: `shadowColor: #000, shadowOpacity: 0.08, shadowRadius: 16, elevation: 8`
-- Active tab: light gray pill (`#EBEBEB`) behind icon + label
-- On iOS 26+: wrap in `GlassView` from `expo-glass-effect` with `glassEffectStyle: 'regular'`
-- Implement via custom `tabBar` prop in Expo Router / React Navigation
 
 ### Tag / filter tab bar (horizontal scroll)
 
@@ -112,17 +100,16 @@ Replaces the standard home header when inside a project:
 | Tab switch | `scrollTo` on horizontal ScrollView, or Expo Router tab transitions |
 | Post-processing overlay slide-up | Reanimated `withSpring` entering animation |
 
-Animation library: `react-native-reanimated` (v3+, already bundled with Expo SDK 54).
+Animation library: `react-native-reanimated` (v4, bundled with Expo SDK 56).
 
 ---
 
 ## Liquid Glass (iOS 26+)
 
-Library: **`expo-glass-effect`** (Expo SDK 54, first-party).
+Library: **`expo-glass-effect`** (Expo SDK 56, first-party).
 
 | Element | Treatment |
 |---|---|
-| Floating bottom nav bar | `GlassView` wrapping the pill container |
 | Post-processing overlay | `GlassContainer` as sheet background |
 | Search bar | `GlassView` wrapper |
 | Everything else | Regular Views — do not over-apply |
@@ -138,8 +125,8 @@ Use `isLiquidGlassAvailable()` to gate any glass-specific layout tweaks at runti
 | Purpose | Library |
 |---|---|
 | Fonts | `expo-font`, `@expo-google-fonts/playfair-display`, `@expo-google-fonts/inter` |
-| Liquid Glass | `expo-glass-effect` (Expo SDK 54+) |
-| Animations | `react-native-reanimated` v3 |
+| Liquid Glass | `expo-glass-effect` (Expo SDK 56+) |
+| Animations | `react-native-reanimated` v4 |
 | Bottom sheet | `@gorhom/bottom-sheet` |
 | Navigation | Expo Router (file-based) |
 | Icons | `@expo/vector-icons` (Ionicons / SF Symbols via `expo-symbols` on iOS) |

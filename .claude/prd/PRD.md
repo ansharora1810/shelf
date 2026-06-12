@@ -124,7 +124,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 **Header:**
 - `☰` hamburger menu — far left, opens left sidebar drawer
 - "Shelf" — centred
-- `🔍` search icon — far right
+- `🔍` search icon + `📅` calendar icon — far right (calendar hidden on the Projects tab)
 
 **Tab bar (below header, horizontally scrollable):**
 
@@ -139,6 +139,12 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 - Links grouped by week in descending order
 - Each week group: 2.5-column horizontal scroll row
 - Each card: thumbnail + name + source platform icon
+
+**Calendar / date filter:**
+- The `📅` icon opens a calendar bottom sheet; days that have saved links are marked
+- Selecting a day filters the active feed (tag or project) to that day, shown as a 2-column grid
+- The icon switches to a filled accent state while a date is active; tapping it again clears the filter and restores the week-grouped feed
+- Available on every tab except Projects
 
 **FAB:** `+` bottom right — opens manual add flow
 
@@ -242,9 +248,7 @@ Triggered by tapping a project card from the Projects tab.
 - `←` back arrow — far left
 - Project name — centred (replaces "Shelf" logo), displayed in title case
 - Font size shrinks to fit on a single line for longer names (max 20 chars)
-- `🔍` search icon + `✏️` pencil icon — far right (search left of pencil)
-
-**Search:** Scoped to this project's links only.
+- `✏️` pencil icon + `📅` calendar icon — far right
 
 **Tab bar:** Same horizontal scroll tag bar as home. Tapping a tag navigates to the global tag view for that tag (not filtered within the project).
 
@@ -396,13 +400,13 @@ flowchart LR
 - Projects tab: 2-column grid of project cards
 - Tag tabs: links grouped by week descending, 2.5-column horizontal scroll rows per week group
 - Scroll bar with bouncy/shrink animation at extremes on projects view
-- Header: `☰` (left, opens sidebar) | `Shelf` (centre) | `🔍` (right)
+- Header: `☰` (left, opens sidebar) | `Shelf` (centre) | `🔍` + `📅` (right)
+- Calendar date filter: marks days with saved links; selecting a day shows that day's links as a grid; available on every tab except Projects
 - Sidebar drawer (left): account, subscription, notifications, about
 - Create project: `+` on home → bottom sheet → name → Create
 - Tab switch: swipe or tap
-- Project detail header: `←` (left) | project name (centre) | `🔍` + `✏️` (right)
+- Project detail header: `←` (left) | project name (centre) | `✏️` + `📅` (right)
 - Project detail tab bar: same global tabs — tapping a tag navigates to global tag view
-- Project detail search: scoped to this project's links only
 - Edit/delete project: pencil icon → bottom sheet with rename input + red Delete option
 
 ### Post-processing overlay
@@ -449,3 +453,33 @@ flowchart LR
 - All links loaded in full (no partial fields) — ~150KB at 100 links, trivially small
 - Tag filtering, top-5 tag computation, and project membership all derived client-side
 - No pagination in v1; add cursor-based pagination if per-user link count grows past ~500
+
+---
+
+## 10. Implementation status
+
+_Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-memory mock store** ([`src/store/shelf.tsx`](../../app/src/store/shelf.tsx)) with **real Supabase authentication**. No application data is persisted to a backend yet._
+
+| Area | Status | Notes |
+|---|---|---|
+| Auth (Apple / Google) | ✅ Done | Supabase OAuth, PKCE + S256, session persistence, auth gate to `/login` |
+| Design system | ✅ Done | Colours, typography, spacing tokens ([`tokens.ts`](../../app/src/constants/tokens.ts)) |
+| Home screen | ✅ Done | Header, top tab bar (`#all` / `projects` / top-5 tags), week-grouped feed, horizontal rows |
+| Tab switch animation | ✅ Done | Reanimated horizontal slide |
+| Projects grid + detail | ✅ Done | 2-col grid, 2×2 collage, inline project detail view |
+| Calendar / date filter | ✅ Done | Marks days with links; day grid; clears on toggle |
+| Link detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
+| Add link / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
+| Search screen | 🟡 Partial | Tag browser + live results built; matching is a **local substring stand-in**, not semantic |
+| Reminder toggle | 🟡 Partial | UI toggle only — no notification delivery wired |
+| Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
+| Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
+| Supabase data backend | ⛔ Pending | Links/projects live in-memory; REST API (§9) not built |
+| Semantic search (embeddings) | ⛔ Pending | pgvector + OpenAI `text-embedding-3-small` not built |
+| AI auto-tagging | ⛔ Pending | 10-tag generation not built; tags come from mock data |
+| Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch |
+| `raw_content` / `embedding` fields | ⛔ Pending | Not in the frontend model; re-embed-on-edit not built |
+| iOS share extension | ⛔ Pending | Manual add only |
+| Push notification reminders | ⛔ Pending | No `expo-notifications` integration |
+| Onboarding screens | ⛔ Pending | Only Login exists — no welcome / feature / notification-permission screens |
+| Pricing / trial / Apple IAP | ⛔ Pending | Not built |
