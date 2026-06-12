@@ -14,11 +14,15 @@ Content consumption is fragmented. YouTube Watch Later, Instagram Collections, b
 
 ### Solution
 
-Shelf is a unified content-saving app. Share any link from any app — Shelf parses the content, AI assigns tags automatically, and semantic search finds it even if you search with different words. A per-link reminder ensures saved content doesn't rot.
+Shelf is a unified content-saving app. Share any link from any app — Shelf parses the content, AI assigns tags automatically, and semantic search finds it even if you search with different words. A per-item reminder ensures saved content doesn't rot.
 
 ### Target user
 
 People who actively consume content across multiple platforms and suffer from the "saved to never return" problem — learners, researchers, content creators, professionals building knowledge in a domain.
+
+### Terminology
+
+The saved entity is an **item**. In v1 every item is a **link** (a URL — website, YouTube, Instagram, TikTok, etc.). Images and PDFs are deferred (§5 Out) but the data model, API, and types are named generically (`item`, `/items`) so those kinds slot in without a rename. Data model, API, and code use "item"; older UI prose and screen names that say "link" refer to the link-kind item and will be renamed to "item" during the data-layer build.
 
 ---
 
@@ -34,7 +38,7 @@ People who actively consume content across multiple platforms and suffer from th
 
 - Truly semantic search (embeddings, not keyword matching — soy surfaces soya)
 - AI tagging from actual content (YouTube transcripts, Instagram captions, full webpage text)
-- Per-link reminders to consume saved content
+- Per-item reminders to consume saved content
 - Warm, spacious, breathing-room UI — the opposite of Raindrop's file-manager feel
 
 ---
@@ -55,7 +59,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 ### Micro-interactions
 
 - Scroll bar on projects view shrinks with a bouncy animation at scroll extremes
-- Link detail thumbnail shrinks slightly as user scrolls up (parallax)
+- Item detail thumbnail shrinks slightly as user scrolls up (parallax)
 - Create project bottom sheet slides up from bottom
 - Post-processing overlay slides up after loading spinner completes
 - Tab switch: smooth horizontal slide
@@ -84,22 +88,25 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
   - **Websites:** title, thumbnail, full page text (for AI tagging only), meta description
   - **YouTube:** title, thumbnail, description + transcript (unofficial API, async)
   - **Instagram:** caption + thumbnail (HTML scraping, accepted fragility — public posts only)
-- AI auto-tagging: 10 tags per link, user can add more manually
-- Every link auto-assigned `#all` tag
-- Project organisation (optional — links are first-class without a project)
+- AI auto-tagging: 10 tags per item, user can add more manually
+- Every item auto-assigned `#all` tag
+- Project organisation (optional — items are first-class without a project)
 - Semantic search via embeddings (pgvector, Supabase)
-- Per-link reminder toggle (push notification)
+- Per-item reminder toggle (push notification)
 - Top 5 tags by frequency in tab bar
+- Per-user deduplication (a user can't hold the same URL twice)
 - Warm, spacious UI
 
 ### Out (v2+)
 
 | Feature | Reason deferred |
 |---|---|
+| Image & PDF items | URL-kind items first; images/PDFs add upload UI, file limits, PDF text extraction, image vision-for-tagging. Data model keeps a generic `type` so they slot in later. When built, files go to **Supabase Storage** (not raw S3 — stays in one platform, integrates with RLS/auth). |
+| Global dedup | v1 dedups per-user only. v2: if any user already processed a URL, copy the processed result instead of re-parsing (§8.3). |
 | Read-only link sharing | Nice, not core to the save→find→consume loop |
 | Collaborative collections | Significant scope |
 | Android | Validate on iOS first |
-| Notes/annotations on links | Useful but not the core thesis |
+| Notes/annotations on items | Useful but not the core thesis |
 | YouTube transcript in search | v1 uses transcript for tagging; full-text search excluded |
 
 ---
@@ -128,20 +135,20 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 
 **Tab bar (below header, horizontally scrollable):**
 
-`projects` | `#all` (default, underlined on load) | top 5 tags by frequency (scrollable)
+`projects` | `#all` (default, underlined on load) | top 5 tags by frequency (scrollable). Switch tabs by tap or swipe.
 
 **Projects tab:**
 - 2-column grid of project cards
-- Each card: auto-generated 2×2 thumbnail collage from first 4 link thumbnails (fallback: warm gradient + project name)
+- Each card: auto-generated 2×2 thumbnail collage from first 4 item thumbnails (fallback: warm gradient + project name)
 - Custom scroll bar with bouncy/shrink animation at extremes
 
 **Tag tabs (`#all` + individual tags):**
-- Links grouped by week in descending order
+- Items grouped by week in descending order
 - Each week group: 2.5-column horizontal scroll row
 - Each card: thumbnail + name + source platform icon
 
 **Calendar / date filter:**
-- The `📅` icon opens a calendar bottom sheet; days that have saved links are marked
+- The `📅` icon opens a calendar bottom sheet; days that have saved items are marked
 - Selecting a day filters the active feed (tag or project) to that day, shown as a 2-column grid
 - The icon switches to a filled accent state while a date is active; tapping it again clears the filter and restores the week-grouped feed
 - Available on every tab except Projects
@@ -154,7 +161,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 
 ![Post-processing overlay wireframe](assets/wireframe-post-processing.png)
 
-Triggered after loading spinner (share extension or manual add). Slides up as an overlay on the current screen.
+Triggered after loading spinner on **manual add** (in-app `+` flow). Slides up as an overlay on the current screen. The share extension does **not** use this overlay — it has its own compact sheet (§6.10) and defers AI processing to the backend.
 
 **Fields:**
 
@@ -171,9 +178,9 @@ Triggered after loading spinner (share extension or manual add). Slides up as an
 
 ---
 
-### 6.4 Link detail screen
+### 6.4 Item detail screen
 
-![Link detail screen wireframe](assets/wireframe-link-detail.png)
+![Item detail screen wireframe](assets/wireframe-link-detail.png)
 
 **Header:** Large thumbnail — shrinks slightly on scroll (parallax). Tapping thumbnail opens original URL in Safari.
 
@@ -195,7 +202,7 @@ Triggered after loading spinner (share extension or manual add). Slides up as an
 **Empty state (no query):**
 - Search bar at top (auto-focused)
 - "Browse by tag" label
-- All tags as flowing wrap of pill chips — tap to filter
+- All tags as flowing wrap of pill chips — tap to filter. Doubles as the tag browser for tags not surfaced in the top-5 tab bar.
 
 **Results state (query typed):**
 - Semantic search results (embeddings — soy surfaces soya)
@@ -214,7 +221,7 @@ Tap `+` on home → bottom sheet slides up:
 
 Project name is stored and displayed in title case (e.g. "app launch ideas" → "App Launch Ideas").
 
-Project thumbnail auto-generates as links are added (2×2 collage of first 4 link thumbnails, fallback warm gradient + name).
+Project thumbnail auto-generates as items are added (2×2 collage of first 4 item thumbnails, fallback warm gradient + name).
 
 ---
 
@@ -232,11 +239,11 @@ Triggered by `☰` — slides in from left.
 
 ### 6.8 Empty states
 
-**Home (`#all`, no links saved):**
+**Home (`#all`, no items saved):**
 Bookmark icon in a circle + "Nothing saved yet" + "Share any link to Shelf from any app, or tap + to add one manually."
 
 **Empty project:**
-"No links in this project yet." + add link button.
+"No items in this project yet." + add item button.
 
 ---
 
@@ -253,7 +260,7 @@ Triggered by tapping a project card from the Projects tab.
 **Tab bar:** Same horizontal scroll tag bar as home. Tapping a tag navigates to the global tag view for that tag (not filtered within the project).
 
 **Body:**
-- Links in this project grouped by week in descending order
+- Items in this project grouped by week in descending order
 - Same 2.5-column horizontal scroll rows as the tag feed
 - Same card format: thumbnail + time badge + colour-split title
 
@@ -267,7 +274,37 @@ Opens a bottom sheet (same pattern as create project):
 - "Save" button
 - Red "Delete project" option below Save
 
-**Empty state:** "No links in this project yet." + add link prompt.
+**Empty state:** "No items in this project yet." + add item prompt.
+
+---
+
+### 6.10 Share extension sheet
+
+The iOS share extension is how items enter Shelf from other apps (Safari, TikTok, Instagram, YouTube, etc.). It runs in a **separate sandboxed process** from the main app and stays in-place over the host app — it never launches the main app (Pattern A).
+
+**Behaviour:**
+- User taps Shelf in the iOS share sheet → compact sheet appears over the host app
+- Shows the shared URL (read-only) and an **optional project picker** (autocomplete from existing projects)
+- **Save** button → fires the item to the backend, then dismisses back to the host app
+- The extension does **not** parse content, generate tags, or wait for AI — it only enqueues the item. All processing happens on the backend after dismissal.
+
+**What "Save" does:**
+1. Reads the user's JWT from the shared **App Group** container (written there by the main app on login)
+2. POSTs the URL (+ optional `project_id`) to the backend `POST /items` endpoint
+3. Dismisses immediately (~200ms; no AI wait)
+4. Backend asynchronously parses content, runs AI tagging, generates the embedding, and advances the item to a terminal status
+5. The item appears in the main app via Realtime (if open) or its next fetch
+
+**Not-signed-in edge case:** If the App Group has no JWT (user shared a link before ever signing in), the sheet shows "Open Shelf to sign in first" instead of the save UI.
+
+**Fields:**
+
+| Field | Behaviour |
+|---|---|
+| Link | Immutable, shown read-only |
+| Project | Optional, autocomplete from existing projects |
+
+**Actions:** Save button + swipe down to dismiss (discards). See §8.5 for the architecture.
 
 ---
 
@@ -290,15 +327,19 @@ flowchart LR
 
 ### 7.2 Share from external app
 
+The extension stays in-place over the host app and enqueues the item; the backend processes it asynchronously.
+
 ```mermaid
 flowchart LR
   A[External app] --> B[iOS share sheet]
   B --> C[Tap Shelf]
-  C --> D[Loading spinner\nAI processing]
-  D --> E[Post-processing overlay]
-  E --> F{Save or dismiss}
-  F -->|Save| G[Link saved]
-  F -->|Dismiss| H[Discarded]
+  C --> D[Compact sheet\nURL + optional project]
+  D --> E{Save or dismiss}
+  E -->|Save| F[POST /items\nusing App Group JWT]
+  E -->|Dismiss| G[Discarded]
+  F --> H[Dismiss to host app]
+  F -.async.-> I[Backend: parse + tag\n+ embed + finalise]
+  I -.-> J[Item ready via Realtime\nor next app open]
 ```
 
 ---
@@ -312,7 +353,7 @@ flowchart LR
   C --> D[Loading spinner\nAI processing]
   D --> E[Post-processing overlay]
   E --> F[Save]
-  F --> G[Link saved]
+  F --> G[Item saved]
 ```
 
 ---
@@ -326,7 +367,7 @@ flowchart LR
   C --> D{User action}
   D -->|Tap tag| E[Filtered tag view]
   D -->|Type query| F[Semantic results]
-  E --> G[Link detail]
+  E --> G[Item detail]
   F --> G
 ```
 
@@ -334,23 +375,75 @@ flowchart LR
 
 ## 8. Technical decisions
 
-> Stack TBD — see tech stack discussion.
+> Stack TBD — see tech stack discussion. Backend on Supabase (Postgres + pgvector + Realtime + Storage).
 
-### Semantic search
+### 8.1 Data model (key fields per item)
 
-- **Embeddings:** OpenAI `text-embedding-3-small` → pgvector on Supabase
-- **Index:** HNSW for sub-50ms query speed at any realistic per-user scale
-- **What gets embedded:** `raw_content + current name + current tags` concatenated into one vector per link
-- **Re-embedding on edit:** Synchronous on save when name or tags change (negligible latency ~300ms)
-- **`raw_content` field:** Immutable, stored permanently per link, used as the base for all future embedding generations. Never overwritten.
+| Field | Mutable | Notes |
+|---|---|---|
+| `id` | No | Server-assigned on create; returned immediately |
+| `type` | No | `link` in v1; `image` / `pdf` reserved (deferred) |
+| `url` | No | The shared URL (link-kind items) — original, as received |
+| `normalized_url` | No | Canonicalised `url` used as the dedup key; `unique (user_id, normalized_url)` |
+| `status` | Derived | Processing lifecycle (§8.2). `pending` / `processing` / `ready` / `partial` / `failed` |
+| `raw_content` | No | Immutable base for all embedding generations; populated during processing. Kept user-agnostic for future global dedup (§8.3) |
+| `name` | Yes | AI pre-filled, user editable; title may arrive in the fast create response |
+| `tags` | Yes | 10 AI pre-filled, user can add |
+| `summary` | No | AI-generated |
+| `thumbnail_url` | No | From OG/Twitter tags or oEmbed; may arrive in the fast create response |
+| `embedding` | Derived | `raw_content + current name + current tags` → one vector; regenerated when name or tags change; last artifact produced (item not searchable until `ready`) |
+| `project_id` | Yes | Optional |
+| `reminder_enabled` | Yes | Push notification toggle |
+| `source` | No | instagram / youtube / website |
 
-### AI tagging
+Every item auto-gets the `#all` tag. Tag filtering, top-5 tag computation, and project membership are all derived client-side from the full item list (§8.6).
 
-- LLM API call per saved link on save/share
-- 10 tags returned. Dirt cheap — fractions of a cent per link.
-- Async processing: share → loading spinner → AI tags → post-processing overlay pre-filled
+### 8.2 Processing & sync model
 
-### Content parsing
+Items are created optimistically and enriched asynchronously. The user never waits for AI.
+
+**Create (fast path, < 2s):**
+- `POST /items` with the URL creates the row immediately at `status: 'processing'` and returns it straight away.
+- The response carries whatever cheap enrichment is available within a hard timeout (~1.5s): for links, the title and thumbnail from Open Graph / Twitter-card tags (or oEmbed for YouTube). If the origin is slow, the create returns **without** thumbnail/title rather than blocking — those fill in via enrichment.
+- The app shows the item in the feed right away, even before tagging/summary/embedding exist.
+
+**Status lifecycle (the "complete" mechanism):**
+- `pending` → row created, enrichment not started
+- `processing` → enrichment underway (content fetch, AI tag, summary, embedding)
+- `ready` → fully enriched; semantically searchable
+- `partial` → terminal; usable but some enrichment permanently failed (e.g. Instagram scrape blocked, transcript unavailable)
+- `failed` → terminal; URL could not be resolved at all
+- "Complete" = any **terminal** state (`ready` / `partial` / `failed`). The client stops watching an item once terminal.
+
+**Live updates — Supabase Realtime (primary):**
+- The app subscribes to Postgres changes on `items where user_id = me and status not in (terminal)`.
+- When the backend finishes and `UPDATE`s the row, the completed item is pushed over the websocket and the UI fills in — no polling loop.
+
+**Polling (fallback only):**
+- If Realtime is unavailable, poll the non-terminal items in **one batched request** (`GET /items?status=processing`), never one call per id (avoids N+1).
+- Exponential backoff with a hard ceiling (~8–10s); after a total window, mark client-side as "taking longer than usual" rather than retrying forever.
+
+**Fetch / reconcile triggers:**
+- Full `GET /items` + `GET /projects` (parallel) on **session acquired** and on **foreground after background**. This is the safety net that catches everything completed while the app was closed, independent of Realtime/polling.
+- No background polling — when the app isn't foregrounded it does nothing; the next foreground GET reconciles.
+- Data fetching must be **gated on session** and re-run on logout→login (the store currently mounts outside the auth gate — see §10).
+
+### 8.3 Deduplication
+
+**v1 — per-user dedup.** A user can't hold the same URL twice.
+
+- **Match key:** `normalized_url`, enforced by `unique (user_id, normalized_url)`.
+- **Normalisation (conservative):** lowercase scheme + host, strip default port, drop the URL fragment, remove trailing slash, strip well-known tracking params (`utm_*`, `fbclid`, `gclid`, `igshid`, `si`, …), and sort the remaining query params. **Meaningful params are kept** (e.g. YouTube `?v=`, article `?id=`) — under-normalising (a missed dup) is safer than over-normalising (merging distinct content).
+- **On collision, `POST /items` is idempotent** — it returns the existing item (not an error), so callers don't special-case it:
+  - **Manual add:** surface the existing item (navigate / highlight) with an "Already in your shelf" toast. If a project was chosen and the item has **no** project, file it into that project; if it already has a different project, leave it and just surface (no silent move).
+  - **Share extension:** fire-and-dismiss as usual; the returned existing id is a no-op save, sheet shows "Already saved ✓" (same project-if-empty rule).
+
+**v2 — global dedup (deferred).** If *any* user has already processed a URL, copy the processed result instead of re-parsing/re-tagging.
+
+- Only the **user-agnostic, immutable** artifacts are shareable: `raw_content`, `thumbnail_url`, source title, `summary`, and the initial AI tags / initial `embedding`. Per-user mutable state (`name`, edited `tags`, `project_id`, `reminder_enabled`) is never copied.
+- Implies a global, normalized-URL-keyed processed-content store separate from per-user items. v1 keeps `raw_content` / `summary` user-agnostic so this is a clean addition later.
+
+### 8.4 Content parsing
 
 | Source | Method | Notes |
 |---|---|---|
@@ -358,101 +451,108 @@ flowchart LR
 | Instagram | HTML scraping of public pages | ToS risk accepted; public posts only; maintenance liability |
 | Websites | Full page text fetch | Full text → AI for tagging; search operates on tags + title only (not raw page text) |
 
-### Data model (key fields per link)
+### 8.5 AI tagging & share extension architecture
 
-| Field | Mutable | Notes |
+**AI tagging:**
+- LLM API call per saved item. 10 tags returned. Dirt cheap — fractions of a cent per item.
+- **Manual add:** synchronous from the user's perspective — `+` → loading spinner → AI tags → post-processing overlay pre-filled.
+- **Share extension:** fully async on the backend — the extension enqueues the item and dismisses; tagging happens server-side and the finished item appears via Realtime or next app open.
+
+**Share extension architecture:**
+- The extension is a separate process and cannot access the main app's Supabase session directly.
+- **App Group** shared container bridges them: the main app writes the user's JWT (access + refresh token) to the App Group on login and on token refresh; the extension reads it when it needs to make an authenticated call.
+- On Save, the extension POSTs `{ url, project_id? }` to `POST /items` using the App Group JWT, then dismisses (~200ms, no AI wait).
+- The backend treats a share-created item as a processing job: parse content → AI tag → embed → advance to terminal status. The main app picks it up via Realtime (if open) or its next `GET /items`.
+- If the App Group has no JWT (link shared before first sign-in), the extension shows a "Open Shelf to sign in first" message rather than the save UI.
+
+### 8.6 Semantic search
+
+- **Embeddings:** OpenAI `text-embedding-3-small` → pgvector on Supabase.
+- **Index:** HNSW for sub-50ms query speed at any realistic per-user scale.
+- **What gets embedded:** `raw_content + current name + current tags` concatenated into one vector per item.
+- **Re-embedding on edit:** Synchronous on save when name or tags change (negligible latency ~300ms).
+- **`raw_content` field:** Immutable, stored permanently per item, used as the base for all future embedding generations. Never overwritten.
+- **Website search scope:** tags + title only, not raw page text.
+
+### 8.7 API surface
+
+| Method | Endpoint | Purpose |
 |---|---|---|
-| `raw_content` | No | Base for all embedding generations |
-| `name` | Yes | AI pre-filled, user editable |
-| `tags` | Yes | 10 AI pre-filled, user can add |
-| `summary` | No | AI-generated |
-| `embedding` | Derived | Regenerated when name or tags change |
-| `project_id` | Yes | Optional |
-| `reminder_enabled` | Yes | Push notification toggle |
-| `source` | No | instagram / youtube / website |
+| GET | `/items` | Load all items (full rows) |
+| GET | `/items?status=processing` | Batched poll of non-terminal items (polling fallback only) |
+| GET | `/projects` | Load all projects on open (catches empty projects) |
+| POST | `/items` | Create (no id) — returns the row immediately at `status: processing` with any fast enrichment; or update (id present). Idempotent on `normalized_url` collision (§8.3) |
+| POST | `/projects` | Upsert project — create (no id) or update (id present) |
+| DELETE | `/items/:id` | Delete an item |
+| DELETE | `/projects/:id` | Delete a project |
+
+**Frontend data strategy:**
+- Both GET endpoints fire in parallel on session-acquired and on foreground (§8.2)
+- All items loaded in full (no partial fields) — ~150KB at 100 items, trivially small
+- Tag filtering, top-5 tag computation, and project membership all derived client-side
+- Live fill-in of in-flight items via Supabase Realtime (polling as fallback)
+- No pagination in v1; add cursor-based pagination if per-user item count grows past ~500
 
 ---
 
 ## 9. Decision log
 
-### Product
-- **App name:** Shelf
-- **Tagline:** Save anything. Find everything.
-- **Free trial:** 5 days, then paid
-- **Pricing:** $3/month or $30/year (Apple IAP)
-- **Platform:** iOS only for v1
-- **Auth:** Apple Sign In + Google Sign In (no email/password)
+Settled decisions and the reasoning behind them. Detail lives in the sections referenced; this is the quick-scan index.
 
-### V1 scope
-- Share extension + manual paste link input
-- Content parsing: websites (full text for AI, title/thumbnail displayed), YouTube (title + thumbnail + description + transcript), Instagram (caption + thumbnail via scraping)
-- YouTube transcript extraction in v1
-- AI auto-tagging: 10 tags per item, user can add more manually
-- Every link auto-gets `#all` tag
-- Projects are optional — links are first-class citizens
-- Semantic search via embeddings (pgvector, Supabase)
-- Per-link reminder toggle (push notification)
-- Warm, light, spacious UI
+### Product & monetisation
+| Decision | Rationale | Ref |
+|---|---|---|
+| Name "Shelf", tagline "Save anything. Find everything." | — | §1 |
+| iOS only for v1 | Validate on one platform before Android | §1, §5 |
+| Auth: Apple + Google Sign In, no email/password | Lower friction, no credential management | §4 |
+| 5-day free trial → $3/mo or $30/yr via Apple IAP | — | §4 |
 
-### Navigation
-- Default landing: `#all` tab
-- Tab bar: `projects` | `#all` | top 5 tags by frequency (scrollable, tap or swipe to switch)
-- Projects tab: 2-column grid of project cards
-- Tag tabs: links grouped by week descending, 2.5-column horizontal scroll rows per week group
-- Scroll bar with bouncy/shrink animation at extremes on projects view
-- Header: `☰` (left, opens sidebar) | `Shelf` (centre) | `🔍` + `📅` (right)
-- Calendar date filter: marks days with saved links; selecting a day shows that day's links as a grid; available on every tab except Projects
-- Sidebar drawer (left): account, subscription, notifications, about
-- Create project: `+` on home → bottom sheet → name → Create
-- Tab switch: swipe or tap
-- Project detail header: `←` (left) | project name (centre) | `✏️` + `📅` (right)
-- Project detail tab bar: same global tabs — tapping a tag navigates to global tag view
-- Edit/delete project: pencil icon → bottom sheet with rename input + red Delete option
+### Scope
+| Decision | Rationale | Ref |
+|---|---|---|
+| Entity noun is **item**; v1 items are all links | Images/PDFs deferred but model stays generic so they slot in without a rename | §1, §5 |
+| Share extension + manual paste in v1 | Core save paths | §5, §6.10 |
+| Content parsing: websites / YouTube (+ transcript) / Instagram | Covers the dominant save sources | §8.4 |
+| AI auto-tagging: 10 tags/item, user can add | Cheap, high-value differentiator | §8.5 |
+| Projects optional; items first-class | Don't force organisation | §5, §6 |
+| Every item auto-gets `#all` | Guarantees a default feed | §8.1 |
+| Images/PDFs deferred → Supabase Storage when built | One platform, integrates with RLS/auth; avoids raw S3 ops surface | §5 |
+| Global dedup deferred to v2 | v1 dedups per-user only | §5, §8.3 |
 
-### Post-processing overlay
-- Slides up after loading spinner
-- Name (editable, AI pre-filled), tags (editable, 10 AI pre-filled), project (autocomplete, optional), link (immutable), summary (immutable), reminder toggle
-- Save button + swipe down to dismiss
-
-### Link detail
-- Parallax thumbnail header (tap to open URL)
-- Name (editable), source icon, summary (immutable), tags (editable), reminder toggle (editable)
-- Persistent "Open" button at bottom
-- Delete button below Open
-
-### Search
-- Empty state: all tags as browsable pills (tap to filter)
-- Typing: semantic results in card format (debounced)
-- Doubles as tag browser for tags not in the top-5 tab bar
+### Navigation & screens
+| Decision | Rationale | Ref |
+|---|---|---|
+| Default landing `#all`; tabs `projects` \| `#all` \| top-5 tags (tap or swipe) | — | §6.2 |
+| Projects tab: 2-col grid, 2×2 collage cards | — | §6.2 |
+| Tag/project feeds: week-grouped descending, 2.5-col horizontal rows | — | §6.2, §6.9 |
+| Calendar date filter on every tab except Projects | Day grid; clears on toggle | §6.2 |
+| Header: `☰` (sidebar) \| `Shelf` \| `🔍` + `📅` | — | §6.2 |
+| Project detail header: `←` \| name \| `✏️` + `📅`; tag taps go to global tag view | Project-scoped search dropped — search is global | §6.9 |
+| Post-processing overlay (manual add only): name/tags/project/link/summary/reminder; save + swipe-to-dismiss | Share extension uses its own compact sheet instead | §6.3 |
+| Item detail: parallax thumbnail (tap→URL), name/source/summary/tags/reminder, persistent Open + Delete | — | §6.4 |
+| Search: tag-pill browser empty state + debounced semantic results; doubles as browser for non-top-5 tags | — | §6.5 |
+| Create/edit project: bottom sheet, 20-char limit, title-cased | — | §6.6, §6.9 |
 
 ### Technical
-- Embeddings: OpenAI `text-embedding-3-small` → pgvector (Supabase), HNSW index
-- Re-embed synchronously (~300ms) on name/tag edit
-- Each link stores `raw_content` (immutable) as embedding base
-- Instagram scraping: ToS risk accepted, public posts only, maintenance liability
-- YouTube: async transcript fetch, UI shows "tagging…" state, fallback to title + description
-- Website search: tags + title only (not raw page text)
+| Decision | Rationale | Ref |
+|---|---|---|
+| Optimistic create: `POST /items` returns immediately at `processing` with fast OG/oEmbed enrichment (~1.5s timeout) | User never waits on AI; item shows instantly | §8.2 |
+| `status` enum is the "complete" mechanism (`pending→processing→ready`, terminal `partial`/`failed`) | Distinguishes "working" from "gave up"; boolean can't | §8.2 |
+| Supabase Realtime primary for live fill-in; batched polling (capped backoff) fallback | No wasted polling; instant UI update | §8.2 |
+| Fetch on session-acquired + foreground; no background polling; gate on session, re-fetch on login | Resource-cheap; safety-net reconcile | §8.2 |
+| Per-user dedup: `unique (user_id, normalized_url)`, idempotent POST, conservative normalisation | Idempotency keeps both callers simple; conservative norm avoids merging distinct content | §8.3 |
+| Re-add files into a chosen project only if item has none | Never silently move an already-filed item | §8.3 |
+| Embeddings: `text-embedding-3-small` → pgvector, HNSW; re-embed synchronously (~300ms) on name/tag edit | Sub-50ms search; cheap re-embed | §8.6 |
+| `raw_content` immutable, user-agnostic, embedding base | Stable base; enables future global dedup | §8.1, §8.6 |
+| Instagram scraping: ToS risk accepted, public posts only | Known maintenance liability | §8.4 |
+| YouTube: async transcript fetch, fallback to title + description | Transcript API is unofficial/fragile | §8.4 |
+| Website search: tags + title only, not raw page text | Keep search precise; raw text is for tagging | §8.4, §8.6 |
 
 ### Design
-- Warm, light, spacious. Breathing room on every screen.
-- Micro-interactions: bouncy scroll bar (projects view), parallax thumbnail (link detail), bottom sheet slide-up (create project + post-processing overlay + edit project)
-
-### API surface
-
-| Method | Endpoint | Purpose |
+| Decision | Rationale | Ref |
 |---|---|---|
-| GET | `/links` | Load all links on open |
-| GET | `/projects` | Load all projects on open (catches empty projects) |
-| POST | `/links` | Upsert link — create (no id) or update (id present) |
-| POST | `/projects` | Upsert project — create (no id) or update (id present) |
-| DELETE | `/links/:id` | Delete a link |
-| DELETE | `/projects/:id` | Delete a project |
-
-**Frontend data strategy:**
-- Both GET endpoints fire in parallel on app open
-- All links loaded in full (no partial fields) — ~150KB at 100 links, trivially small
-- Tag filtering, top-5 tag computation, and project membership all derived client-side
-- No pagination in v1; add cursor-based pagination if per-user link count grows past ~500
+| Warm, light, spacious; breathing room everywhere | The anti-Raindrop feel | §3 |
+| Micro-interactions: bouncy scroll bar (projects), parallax thumbnail (item detail), bottom-sheet slide-up (create/edit project + post-processing overlay) | — | §3 |
 
 ---
 
@@ -467,19 +567,22 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | Home screen | ✅ Done | Header, top tab bar (`#all` / `projects` / top-5 tags), week-grouped feed, horizontal rows |
 | Tab switch animation | ✅ Done | Reanimated horizontal slide |
 | Projects grid + detail | ✅ Done | 2-col grid, 2×2 collage, inline project detail view |
-| Calendar / date filter | ✅ Done | Marks days with links; day grid; clears on toggle |
-| Link detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
-| Add link / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
+| Calendar / date filter | ✅ Done | Marks days with items; day grid; clears on toggle |
+| Item detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
+| Add item / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
 | Search screen | 🟡 Partial | Tag browser + live results built; matching is a **local substring stand-in**, not semantic |
 | Reminder toggle | 🟡 Partial | UI toggle only — no notification delivery wired |
 | Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
 | Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
-| Supabase data backend | ⛔ Pending | Links/projects live in-memory; REST API (§9) not built |
-| Semantic search (embeddings) | ⛔ Pending | pgvector + OpenAI `text-embedding-3-small` not built |
-| AI auto-tagging | ⛔ Pending | 10-tag generation not built; tags come from mock data |
-| Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch |
+| Supabase data backend | ⛔ Pending | Items/projects live in-memory; REST API (§8.7) not built. Store mounts outside the auth gate ([_layout.tsx](../../app/src/store/shelf.tsx)) — must be gated on session + re-fetch on login |
+| Optimistic create + status lifecycle | ⛔ Pending | `status` enum, fast OG/oEmbed create response (§8.2) |
+| Realtime fill-in (+ polling fallback) | ⛔ Pending | Supabase Realtime subscription on non-terminal items; batched poll fallback (§8.2) |
+| Per-user dedup | ⛔ Pending | `unique (user_id, normalized_url)`; idempotent `POST /items`; URL normalisation (§8.3) |
+| Semantic search (embeddings) | ⛔ Pending | pgvector + OpenAI `text-embedding-3-small` not built (§8.6) |
+| AI auto-tagging | ⛔ Pending | 10-tag generation not built; tags come from mock data (§8.5) |
+| Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch (§8.4) |
 | `raw_content` / `embedding` fields | ⛔ Pending | Not in the frontend model; re-embed-on-edit not built |
-| iOS share extension | ⛔ Pending | Manual add only |
+| iOS share extension | ⛔ Pending | In-place sheet (URL + optional project) → `POST /items` via App Group JWT → backend async processing (§6.10, §8.5) |
 | Push notification reminders | ⛔ Pending | No `expo-notifications` integration |
 | Onboarding screens | ⛔ Pending | Only Login exists — no welcome / feature / notification-permission screens |
 | Pricing / trial / Apple IAP | ⛔ Pending | Not built |
