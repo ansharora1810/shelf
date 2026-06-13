@@ -11,7 +11,7 @@ Design decisions for frontend implementation. Derived from the PRD and the inspi
 | `background` | `#F2EDE4` | App background (warm cream) |
 | `surface` | `#FFFFFF` | Cards, nav bar, bottom sheets |
 | `primary` | `#2D4A35` | Headings, body text, nav icons |
-| `accent` | `#C4532A` | Tab underline, badges, counts |
+| `accent` | `#C4532A` | First two words of titles, tab underline, badges, counts |
 | `text-secondary` | `#8A8A8A` | Inactive tab labels, metadata |
 | `badge-bg` | `#F2EDE4` | Time/source badge pill background (matches app background) |
 
@@ -30,7 +30,7 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 | Count / metadata (e.g. "20 SAVED") | Inter | Medium (500) | 11px | Upper |
 | Badge label (e.g. "40m") | Inter | Regular (400) | 10px | — |
 
-**Card title:** the card shows the item `name` in `primary` (single colour — the earlier accent/`primary` "descriptor split" is dropped; the AI returns `name`/`summary`/`tags`, not structured title parts). `summary` appears on the item detail screen, not the card.
+**Card title colour:** the client renders the **first two words** of `name` in `accent` and the remainder in `primary` — a pure frontend rule on the single `name` field (no AI-provided split, no `descriptor` field). Same treatment on the card and the item detail title. `summary` appears on the detail screen, not the card.
 
 **Font loading:** `expo-font` + `@expo-google-fonts/playfair-display` + `@expo-google-fonts/inter`.
 
@@ -62,7 +62,7 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 
 - Image fills card with `borderRadius: 12`, aspect ratio ~1:1
 - Badge (bottom-left, absolute): cream pill, clock icon + `consume_time` in `accent` (hidden when blank)
-- Title below image: item `name` in `primary` (single colour)
+- Title below image: item `name`, first two words in `accent`, rest in `primary`
 - No card background — sits directly on app background
 
 ### Section header row

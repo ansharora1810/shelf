@@ -195,7 +195,7 @@ Summary is AI-generated and not shown here — it fills in on the item later.
 **Header:** Large thumbnail — shrinks slightly on scroll (parallax). Tapping thumbnail opens original URL in Safari.
 
 **Body:**
-- NAME (tap to edit)
+- NAME (tap to edit) — first two words in `accent`, rest in `primary` (same client-side rule as the card)
 - Source platform icon (Instagram / YouTube / Website) + domain
 - Consume-time line below the source (clock icon + time, accent colour) — start-aligned with the source row and matching its text size; hidden when `consume_time` is blank
 - Summary (immutable)
@@ -274,7 +274,7 @@ Triggered by tapping a project card from the Projects tab.
 **Body:**
 - Items in this project grouped by week in descending order
 - Same 2.5-column horizontal scroll rows as the tag feed
-- Same card format: thumbnail + consume-time badge (hidden when blank) + title (`name`)
+- Same card format: thumbnail + consume-time badge (hidden when blank) + title (`name`, first two words in `accent`, rest in `primary` — client-side rule)
 
 **FAB:** `+` bottom right — opens manual add flow with this project pre-selected.
 
@@ -672,7 +672,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Per-user dedup: `unique (user_id, normalized_url)`, idempotent POST, conservative normalisation | Idempotency keeps both callers simple; conservative norm avoids merging distinct content | §8.3 |
 | Re-add files into a chosen project only if item has none | Never silently move an already-filed item | §8.3 |
 | Semantic search is **v2**: `text-embedding-3-small` → pgvector/HNSW, `POST /search`, async re-embed-on-edit. **v1 = client-side keyword** (name/tags/summary). No embeddings generated in v1; `raw_content` still stored as the v2 base | Ship the cheap search first; embeddings are the differentiator but not v1-critical | §8.6 |
-| AI worker outputs `name`/`summary`/`tags`/`consume_time` (no `descriptor`/`title` split); card shows `name`, summary on detail — colour-split dropped, frontend renames `title`→`name`, `descriptor`→`summary` | DB model is final; one shape, no structured split to maintain | §8.1, §6.2 |
+| AI worker outputs `name`/`summary`/`tags`/`consume_time` (single `name`, no AI-provided split); card + detail render `name`'s **first two words in accent**, rest primary — a client-side rule; summary on detail | DB model is final; the colour accent is pure frontend, no `descriptor` field to maintain | §8.1, §6.2, §6.4 |
 | Reminder: **v1 stores the toggle** (`reminder_enabled`); scheduling/delivery (local vs push) is **v2** | Ship the field now; defer notification plumbing | §5, §8.5 |
 | Project delete asks **delete items vs orphan** (`delete_items` flag on `DELETE /projects/:id`) | User decides; FK behaviour follows the flag (delete or set-null) | §6.9, §8.7 |
 | Share extension self-refreshes its JWT via the App Group refresh token if the access token is stale | The extension doesn't run the main app's auto-refresh loop; the access token may be >1h old | §6.10, §8.9 |
@@ -714,7 +714,7 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | Add item / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
 | Search screen (v1 keyword) | 🟡 Partial | Tag browser + live keyword results over name/tags/summary built — **this is the v1 mechanism** (no longer a stand-in); needs to point at real data. Semantic is v2 (§8.6) |
 | Reminder toggle | 🟡 Partial | UI toggle built; v1 only persists `reminder_enabled` — notification delivery is **v2** (§8.5) |
-| Card title rename (`title`→`name`, drop colour-split) | ⛔ Pending | Frontend uses `descriptor`/`title` split; DB model is `name`/`summary`/`tags`. Rename fields, show `name` on the card, drop the two-tone split (§8.1, §6.2) |
+| Card title rename + accent rule | ⛔ Pending | Frontend uses an AI `descriptor`/`title` split; DB model is single `name`. Collapse to `name`, and render its first two words in accent client-side (card + detail) (§8.1, §6.2, §6.4) |
 | Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
 | Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
 | Supabase schema + RLS | ⛔ Pending | `items` + `projects` tables, `user_id`-scoped RLS; direct-client CRUD wiring. Store mounts outside the auth gate ([_layout.tsx](../../app/src/store/shelf.tsx)) — must be gated on session + re-fetch on login |
