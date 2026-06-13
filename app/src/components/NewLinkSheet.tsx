@@ -119,7 +119,7 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
         summary: processed.summary,
         reminderEnabled: reminder,
         projectId,
-        duration: processed.duration,
+        consumeTime: processed.consumeTime,
         savedAt: new Date().toISOString(),
       })
       Keyboard.dismiss()

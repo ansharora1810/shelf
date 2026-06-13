@@ -121,10 +121,18 @@ export default function LinkDetailScreen() {
             <Text style={styles.titleMain}>{link.title}</Text>
           </Text>
 
-          {/* Source */}
-          <View style={styles.sourceRow}>
-            <Ionicons name={SOURCE_ICONS[link.source]} size={14} color={Colors.primary} />
-            <Text style={styles.sourceDomain}>{domain}</Text>
+          {/* Source + consume time */}
+          <View style={styles.metaWrap}>
+            <View style={styles.sourceRow}>
+              <Ionicons name={SOURCE_ICONS[link.source]} size={14} color={Colors.primary} />
+              <Text style={styles.sourceDomain}>{domain}</Text>
+            </View>
+            {link.consumeTime ? (
+              <View style={styles.consumeRow}>
+                <Ionicons name="time-outline" size={14} color={Colors.accent} />
+                <Text style={styles.consumeText}>{link.consumeTime}</Text>
+              </View>
+            ) : null}
           </View>
 
           {/* Summary */}
@@ -231,6 +239,9 @@ const styles = StyleSheet.create({
     fontSize: 28,
     color: Colors.primary,
   },
+  metaWrap: {
+    gap: 8,
+  },
   sourceRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -240,6 +251,16 @@ const styles = StyleSheet.create({
     fontFamily: FontFamily.sans,
     fontSize: 13,
     color: Colors.primary,
+  },
+  consumeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  consumeText: {
+    fontFamily: FontFamily.sans,
+    fontSize: 13,
+    color: Colors.accent,
   },
   summary: {
     fontFamily: FontFamily.sans,

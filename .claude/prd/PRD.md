@@ -145,7 +145,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 **Tag tabs (`#all` + individual tags):**
 - Items grouped by week in descending order
 - Each week group: 2.5-column horizontal scroll row
-- Each card: thumbnail + name + source platform icon
+- Each card: thumbnail + name + source platform icon, plus a consume-time badge (clock icon + formatted `consume_time`, e.g. "12m") overlaid on the thumbnail. The badge is **hidden when `consume_time` is blank/`null`** — never render an empty pill.
 
 **Calendar / date filter:**
 - The `📅` icon opens a calendar bottom sheet; days that have saved items are marked
@@ -186,7 +186,8 @@ Triggered after loading spinner on **manual add** (in-app `+` flow). Slides up a
 
 **Body:**
 - NAME (tap to edit)
-- Source platform icon (Instagram / YouTube / Website)
+- Source platform icon (Instagram / YouTube / Website) + domain
+- Consume-time line below the source (clock icon + time, accent colour) — start-aligned with the source row and matching its text size; hidden when `consume_time` is blank
 - Summary (immutable)
 - Tags (editable)
 - Reminder toggle (editable)
@@ -262,7 +263,7 @@ Triggered by tapping a project card from the Projects tab.
 **Body:**
 - Items in this project grouped by week in descending order
 - Same 2.5-column horizontal scroll rows as the tag feed
-- Same card format: thumbnail + time badge + colour-split title
+- Same card format: thumbnail + consume-time badge (hidden when blank) + colour-split title
 
 **FAB:** `+` bottom right — opens manual add flow with this project pre-selected.
 
@@ -391,6 +392,7 @@ flowchart LR
 | `tags` | Yes | 10 AI pre-filled, user can add |
 | `summary` | No | AI-generated |
 | `thumbnail_url` | No | From OG/Twitter tags or oEmbed; may arrive in the fast create response |
+| `consume_time` | No | Estimated time to consume, in **seconds** (read / watch / listen). Derived during processing (§8.4). `null` when not applicable or unknown; UI hides the badge when blank |
 | `embedding` | Derived | `raw_content + current name + current tags` → one vector; regenerated when name or tags change; last artifact produced (item not searchable until `ready`) |
 | `project_id` | Yes | Optional |
 | `reminder_enabled` | Yes | Push notification toggle |
@@ -450,6 +452,12 @@ Items are created optimistically and enriched asynchronously. The user never wai
 | YouTube | Official oEmbed/Data API + unofficial transcript API | Transcript fetch is async; fallback to title + description if unavailable |
 | Instagram | HTML scraping of public pages | ToS risk accepted; public posts only; maintenance liability |
 | Websites | Full page text fetch | Full text → AI for tagging; search operates on tags + title only (not raw page text) |
+
+**`consume_time` derivation:**
+- **Websites / articles:** estimate from `raw_content` word count at ~225 wpm → seconds.
+- **YouTube:** actual video length from the oEmbed/Data API.
+- **Instagram:** none — `null` (no natural duration; badge hidden).
+- **Images / PDFs (deferred):** images `null`; PDFs may estimate from extracted text word count.
 
 ### 8.5 AI tagging & share extension architecture
 
@@ -544,6 +552,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Re-add files into a chosen project only if item has none | Never silently move an already-filed item | §8.3 |
 | Embeddings: `text-embedding-3-small` → pgvector, HNSW; re-embed synchronously (~300ms) on name/tag edit | Sub-50ms search; cheap re-embed | §8.6 |
 | `raw_content` immutable, user-agnostic, embedding base | Stable base; enables future global dedup | §8.1, §8.6 |
+| `consume_time` as integer seconds, formatted client-side, badge hidden when blank | Media-agnostic (read/watch/listen); sortable/locale-flexible vs a pre-formatted string; no empty pills | §8.1, §8.4, §6.2 |
 | Instagram scraping: ToS risk accepted, public posts only | Known maintenance liability | §8.4 |
 | YouTube: async transcript fetch, fallback to title + description | Transcript API is unofficial/fragile | §8.4 |
 | Website search: tags + title only, not raw page text | Keep search precise; raw text is for tagging | §8.4, §8.6 |
@@ -582,6 +591,7 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | AI auto-tagging | ⛔ Pending | 10-tag generation not built; tags come from mock data (§8.5) |
 | Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch (§8.4) |
 | `raw_content` / `embedding` fields | ⛔ Pending | Not in the frontend model; re-embed-on-edit not built |
+| `consume_time` field | 🟡 Partial | Frontend renamed `duration` → `consumeTime`; badge hidden when blank (§6.2) ✅. Still a mock-only `string` (e.g. `'12m'`) — convert to int seconds + client-side formatter and derive on backend (§8.4) ⛔ |
 | iOS share extension | ⛔ Pending | In-place sheet (URL + optional project) → `POST /items` via App Group JWT → backend async processing (§6.10, §8.5) |
 | Push notification reminders | ⛔ Pending | No `expo-notifications` integration |
 | Onboarding screens | ⛔ Pending | Only Login exists — no welcome / feature / notification-permission screens |

@@ -6,7 +6,7 @@ export interface ProcessedLink {
   summary: string
   thumbnail: string
   source: Source
-  duration: string
+  consumeTime: string
 }
 
 // Accept bare domains (e.g. "amazon.in") by defaulting the scheme to https.
@@ -61,7 +61,7 @@ export function fallbackProcessed(url: string): ProcessedLink {
     summary: '',
     thumbnail: `https://picsum.photos/seed/${seed}/400/400`,
     source: inferSource(url),
-    duration: '',
+    consumeTime: '',
   }
 }
 
@@ -77,6 +77,6 @@ export async function processLink(url: string): Promise<ProcessedLink> {
     summary: '',
     thumbnail: `https://picsum.photos/seed/${seed}/400/400`,
     source,
-    duration: '',
+    consumeTime: '',
   }
 }

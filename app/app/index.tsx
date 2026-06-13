@@ -130,11 +130,11 @@ function TabBar({ activeKey, onSelect }: { activeKey: string; onSelect: (key: st
   )
 }
 
-function DurationBadge({ duration }: { duration: string }) {
+function ConsumeTimeBadge({ consumeTime }: { consumeTime: string }) {
   return (
     <View style={styles.badge}>
       <Ionicons name="time-outline" size={10} color={Colors.accent} />
-      <Text style={styles.badgeText}>{duration}</Text>
+      <Text style={styles.badgeText}>{consumeTime}</Text>
     </View>
   )
 }
@@ -150,7 +150,7 @@ function LinkCard({ link, width = CARD_WIDTH }: { link: Link; width?: number }) 
           contentFit="cover"
           transition={200}
         />
-        {link.duration ? <DurationBadge duration={link.duration} /> : null}
+        {link.consumeTime ? <ConsumeTimeBadge consumeTime={link.consumeTime} /> : null}
       </View>
       <Text style={styles.cardTitle} numberOfLines={3}>
         {link.descriptor ? <Text style={styles.cardDescriptor}>{link.descriptor} </Text> : null}

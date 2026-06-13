@@ -11,7 +11,7 @@ export interface Link {
   summary: string
   reminderEnabled: boolean
   projectId: string | null
-  duration: string
+  consumeTime: string
   savedAt: string // ISO date string
 }
 

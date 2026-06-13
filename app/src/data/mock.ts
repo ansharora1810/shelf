@@ -14,7 +14,7 @@ export const mockLinks: Link[] = [
       'Cal Newport argues that the ability to focus without distraction is becoming increasingly rare — and simultaneously more valuable. A compelling case for restructuring how you spend your working hours.',
     reminderEnabled: true,
     projectId: '2',
-    duration: '12m',
+    consumeTime: '12m',
     savedAt: '2026-06-05T10:00:00Z',
   },
   {
@@ -29,7 +29,7 @@ export const mockLinks: Link[] = [
       'A practical guide to building a second brain using a combination of Obsidian, tagging conventions, and weekly review habits.',
     reminderEnabled: false,
     projectId: null,
-    duration: '8m',
+    consumeTime: '8m',
     savedAt: '2026-06-04T14:30:00Z',
   },
   {
@@ -44,7 +44,7 @@ export const mockLinks: Link[] = [
       'A curated list of VS Code extensions that meaningfully improve the development experience in 2026, with a focus on AI-assisted coding tools.',
     reminderEnabled: false,
     projectId: '1',
-    duration: '6m',
+    consumeTime: '6m',
     savedAt: '2026-06-03T09:00:00Z',
   },
   {
@@ -59,7 +59,7 @@ export const mockLinks: Link[] = [
       'Exact scripts and frameworks for negotiating compensation at every stage — offer, review, and promotion. Includes counter-offer language that works.',
     reminderEnabled: true,
     projectId: '2',
-    duration: '18m',
+    consumeTime: '18m',
     savedAt: '2026-05-31T11:00:00Z',
   },
   {
@@ -74,7 +74,7 @@ export const mockLinks: Link[] = [
       'Interactive visualisations that make the exponential nature of compound interest click — includes comparisons between starting at 22 vs 32.',
     reminderEnabled: false,
     projectId: '3',
-    duration: '5m',
+    consumeTime: '5m',
     savedAt: '2026-05-30T16:00:00Z',
   },
   {
@@ -89,7 +89,7 @@ export const mockLinks: Link[] = [
       'A thorough walkthrough of React 19 changes — server components, the new compiler, and the use() hook — with practical examples for each.',
     reminderEnabled: false,
     projectId: '1',
-    duration: '22m',
+    consumeTime: '22m',
     savedAt: '2026-05-29T08:00:00Z',
   },
   {
@@ -104,7 +104,7 @@ export const mockLinks: Link[] = [
       'A repeatable framework for testing whether a startup idea has real demand before building anything — using landing pages, manual outreach, and a 48-hour deadline.',
     reminderEnabled: true,
     projectId: '1',
-    duration: '9m',
+    consumeTime: '9m',
     savedAt: '2026-05-22T12:00:00Z',
   },
   {
@@ -119,7 +119,7 @@ export const mockLinks: Link[] = [
       'James Clear explains the neurological loop behind habit formation and how to deliberately design cue-routine-reward cycles for the behaviours you want.',
     reminderEnabled: false,
     projectId: null,
-    duration: '14m',
+    consumeTime: '14m',
     savedAt: '2026-05-21T10:00:00Z',
   },
   {
@@ -133,7 +133,7 @@ export const mockLinks: Link[] = [
     summary: 'A roundup of the fastest ways to ship a high-converting landing page without hiring a designer.',
     reminderEnabled: false,
     projectId: '1',
-    duration: '6m',
+    consumeTime: '6m',
     savedAt: '2026-05-20T09:00:00Z',
   },
   {
@@ -147,7 +147,7 @@ export const mockLinks: Link[] = [
     summary: 'A pragmatic breakdown of tech stack choices for solo founders — what to optimise for speed, what to avoid, and when to revisit.',
     reminderEnabled: false,
     projectId: '4',
-    duration: '10m',
+    consumeTime: '10m',
     savedAt: '2026-05-19T10:00:00Z',
   },
   {
@@ -161,7 +161,7 @@ export const mockLinks: Link[] = [
     summary: 'A calm, evidence-based approach to requesting a raise — including timing, framing, and what to do if the answer is no.',
     reminderEnabled: false,
     projectId: '2',
-    duration: '7m',
+    consumeTime: '7m',
     savedAt: '2026-05-19T14:00:00Z',
   },
   {
@@ -175,7 +175,7 @@ export const mockLinks: Link[] = [
     summary: 'Real strategies for building side income without burning out — focused on low-overhead, high-leverage options.',
     reminderEnabled: true,
     projectId: null,
-    duration: '19m',
+    consumeTime: '19m',
     savedAt: '2026-05-18T10:00:00Z',
   },
   {
@@ -189,7 +189,7 @@ export const mockLinks: Link[] = [
     summary: 'A no-jargon explainer on what index funds are, why they outperform most active funds, and how to start investing in them.',
     reminderEnabled: false,
     projectId: '3',
-    duration: '8m',
+    consumeTime: '8m',
     savedAt: '2026-05-17T11:00:00Z',
   },
   {
@@ -203,7 +203,7 @@ export const mockLinks: Link[] = [
     summary: 'A deep dive into the origins of the 4% withdrawal rule, the assumptions behind it, and how to adapt it for early retirement.',
     reminderEnabled: true,
     projectId: null,
-    duration: '11m',
+    consumeTime: '11m',
     savedAt: '2026-05-16T09:00:00Z',
   },
   {
@@ -217,7 +217,7 @@ export const mockLinks: Link[] = [
     summary: 'How to think about crypto as a small, risk-isolated allocation within a broader portfolio — not a replacement for one.',
     reminderEnabled: false,
     projectId: null,
-    duration: '9m',
+    consumeTime: '9m',
     savedAt: '2026-05-15T15:00:00Z',
   },
 ]
