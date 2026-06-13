@@ -508,7 +508,7 @@ The client only ever *reflects* a backend status; it never decides "failed" on a
 ### 8.5 AI tagging & share extension architecture
 
 **AI tagging:**
-- LLM API call per saved item. Worker outputs `name`, `summary`, and 10 `tags` (and `consume_time`). Dirt cheap — fractions of a cent per item. (Embedding generation is **v2** — §8.6.)
+- One **Gemini 2.5 Flash-Lite** call per saved item → `name`, `summary`, 10 `tags` (a single structured-output call). `consume_time` is derived non-AI (§8.4). Dirt cheap — fractions of a cent per item. (Embedding generation is **v2**, OpenAI `text-embedding-3-small` — §8.6.)
 - **Always async** across every entry point (manual add, share, file). The worker generates the fields after create; they stream into the item via Realtime. Manual add lets the user add their own tags in the popup (§6.3); the AI tags merge in when ready.
 
 **Reminders:** v1 stores the per-item `reminder_enabled` toggle only. Scheduling and delivery (local notification vs server push) are **v2** — nothing fires a notification in v1.
@@ -601,7 +601,7 @@ Guiding constraint: **no users yet, slow scale → no ever-running infra, on-tri
 | Watchdog + orphan sweep | **pg_cron** | In-DB periodic sweep; fails stuck `processing` / abandoned `awaiting_upload` rows |
 | Live updates (backend → app) | **Supabase Realtime** | Already chosen (§8.2); no polling |
 
-**Auth.** The app sends the Supabase JWT on every call. Direct-CRUD relies on RLS. The Lambda endpoints verify the JWT (Supabase JWKS, `sub` = `user_id`); the worker uses the **service-role key** (bypasses RLS — it acts for the system) and scopes every write by the job's `item_id`. Service-role + OpenAI keys live only in Lambda, never on the device.
+**Auth.** The app sends the Supabase JWT on every call. Direct-CRUD relies on RLS. The Lambda endpoints verify the JWT (Supabase JWKS, `sub` = `user_id`); the worker uses the **service-role key** (bypasses RLS — it acts for the system) and scopes every write by the job's `item_id`. Service-role + Gemini (and the v2 OpenAI-embedding) keys live only in Lambda, never on the device.
 
 **No queue in v1.** `trigger → pg_net → Lambda` directly, no pgmq. At zero traffic a queue's buffering/retry earns nothing and adds plumbing. Reliability is covered by in-invocation retries (transient errors) + the pg_cron watchdog (stuck → `failed`); a `failed` item is removed and re-added in v1 (the `reprocess` retry path is v2). **Upgrade path:** when volume or reliability needs it, insert **pgmq** (`trigger → pgmq.send`, Lambda drained by pg_cron or an SQS-style consumer) — the worker code barely changes, and pgmq's visibility-timeout/DLQ can then own the watchdog role.
 
@@ -634,6 +634,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Share extension + manual paste in v1 | Core save paths | §5, §6.10 |
 | Content parsing: websites / YouTube (+ transcript) / Instagram | Covers the dominant save sources | §8.4 |
 | AI auto-tagging: 10 tags/item, user can add | Cheap, high-value differentiator | §8.5 |
+| AI model: **Gemini 2.5 Flash-Lite** for name/summary/tags (one structured call); OpenAI `text-embedding-3-small` for embeddings (v2) | Cheap, fast, structured output for tagging; embeddings deferred to v2 | §8.5, §8.6 |
 | Projects optional; items first-class | Don't force organisation | §5, §6 |
 | Every item auto-gets `#all` | Guarantees a default feed | §8.1 |
 | Images/PDFs deferred → Supabase Storage when built | One platform, integrates with RLS/auth; S3-backed so the same presigned-upload flow applies; the event→worker trigger and completion push are native (vs DIY on raw S3) | §5, §8.8 |
@@ -723,7 +724,7 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | Optimistic create + status lifecycle | ⛔ Pending | `status` enum, fast OG/oEmbed create response (§8.2) |
 | Realtime fill-in | ⛔ Pending | Supabase Realtime subscription on non-terminal items; reconcile GETs as the safety net, no polling (§8.2) |
 | Per-user dedup | ⛔ Pending | `unique (user_id, normalized_url)`; idempotent `POST /items`; URL normalisation (§8.3) |
-| AI tagging (name/summary/tags/consume_time) | ⛔ Pending | Worker LLM call not built; fields come from mock data (§8.5). LLM model TBD |
+| AI tagging (name/summary/tags) | ⛔ Pending | Worker **Gemini 2.5 Flash-Lite** call not built; fields come from mock data (§8.5) |
 | Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch (§8.4) |
 | `raw_content` field | ⛔ Pending | Stored immutably in v1 as the v2-embedding base; not in the frontend model |
 | Semantic search + embeddings (v2) | ⛔ v2 | pgvector, `text-embedding-3-small`, `POST /search`, `reembed` (§8.6) |
