@@ -427,17 +427,13 @@ Items are created optimistically and enriched asynchronously. The user never wai
 - "Complete" = any **terminal** state (`ready` / `failed`). The client stops watching an item once terminal.
 - **No `partial` state.** Enrichment degrades gracefully and still lands at `ready`: a missing YouTube transcript falls back to the description; if AI tagging fails after retries the item keeps `#all` + whatever was parsed and the user can add tags manually. `failed` is reserved for "nothing usable was produced."
 
-**Live updates — Supabase Realtime (primary):**
+**Live updates — Supabase Realtime:**
 - The app subscribes to Postgres changes on `items where user_id = me and status not in (terminal)`.
-- When the backend finishes and `UPDATE`s the row, the completed item is pushed over the websocket and the UI fills in — no polling loop.
+- When the backend finishes and `UPDATE`s the row, the completed item is pushed over the websocket and the UI fills in. No polling — Realtime is the only live-update mechanism.
 
-**Polling (fallback only):**
-- If Realtime is unavailable, poll the non-terminal items in **one batched request** (`GET /items?status=processing`), never one call per id (avoids N+1).
-- Exponential backoff with a hard ceiling (~8–10s); after a total window, mark client-side as "taking longer than usual" rather than retrying forever.
-
-**Fetch / reconcile triggers:**
-- Full `GET /items` + `GET /projects` (parallel) on **session acquired**, on **foreground after background**, and on **network reconnect**. This is the safety net that catches everything completed while the app was closed/offline, independent of Realtime/polling.
-- No background polling — when the app isn't foregrounded it does nothing; the next foreground GET reconciles.
+**Fetch / reconcile triggers (the safety net):**
+- Full `GET /items` + `GET /projects` (parallel) on **session acquired**, on **foreground after background**, on **network reconnect**, and on **Realtime re-subscribe** (websocket drop→resume). This catches anything that completed while the app was closed/offline or while the subscription was briefly down — covering the gap a polling fallback would otherwise fill.
+- No background work when the app isn't foregrounded; the next reconcile fetch catches up.
 - Data fetching must be **gated on session** and re-run on logout→login (the store currently mounts outside the auth gate — see §10).
 
 **Failure, watchdog & retry — the backend owns failure, never the client:**
@@ -515,7 +511,6 @@ The client only ever *reflects* a backend status; it never decides "failed" on a
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/items` | Load all items (full rows) |
-| GET | `/items?status=processing` | Batched poll of non-terminal items (polling fallback only) |
 | GET | `/projects` | Load all projects on open (catches empty projects) |
 | POST | `/items` | **Create** — body branches on kind. **Link:** `{ url, project_id? }` → fast non-AI enrichment (`source`, `title`, `thumbnail_url`, `consume_time`), row at `processing`, returns the entity; idempotent on `normalized_url` collision (§8.3). **File (v2):** `{ type, filetype, size, project_id? }` (app pre-validates) → row at `awaiting_upload`, returns `{ id, upload_url }` (presigned PUT, 3-min TTL, type/size-constrained, id in object key). See §8.8 |
 | PUT | `/items/:id` | **Update** an item — the manual-add Save (user tags / project / name) and later edits (name, tags, project, reminder). Re-embeds on name/tag change (§8.6) |
@@ -530,7 +525,7 @@ Synchronous failures of `POST /items` (create) and of the direct upload PUT are 
 - Both GET endpoints fire in parallel on session-acquired and on foreground (§8.2)
 - All items loaded in full (no partial fields) — ~150KB at 100 items, trivially small
 - Tag filtering, top-5 tag computation, and project membership all derived client-side
-- Live fill-in of in-flight items via Supabase Realtime (polling as fallback)
+- Live fill-in of in-flight items via Supabase Realtime; reconcile GETs are the safety net (no polling)
 - No pagination in v1; add cursor-based pagination if per-user item count grows past ~500
 
 ### 8.8 Item ingestion — end-to-end flow
@@ -609,7 +604,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Optimistic create: `POST /items` returns immediately at `processing` with non-AI fields (source/title/thumbnail/consume-time); AI always async | User never waits on AI; item shows instantly | §8.2 |
 | Endpoints: `POST /items` create (one endpoint, body branches link vs file — file returns id + presigned URL), `PUT /items/:id` update, `POST /items/:id/reprocess` retry | One create endpoint for both kinds; create/update separated; POST (not GET) since create writes a row | §8.7 |
 | `status` enum: `awaiting_upload` (file uploads) → `processing` → terminal `ready`/`failed`; no `partial` | Enrichment degrades gracefully to `ready`; `failed` = nothing usable produced. Simpler than carrying a partial state nothing branches on | §8.2 |
-| Supabase Realtime primary for live fill-in; batched polling (capped backoff) fallback | No wasted polling; instant UI update | §8.2 |
+| Supabase Realtime is the only live-update mechanism (no polling); reconcile GETs (incl. on Realtime re-subscribe) are the safety net | Instant fill-in without a polling loop; reconcile covers any missed push | §8.2 |
 | Backend owns failure via a watchdog (deadline > P99); client never declares failure on a timer | Avoids client/backend split-brain (success-after-client-gave-up); bounds the skeleton | §8.2 |
 | No attempt/fencing token; guard terminal writes on `WHERE status='processing'`, reset `processing_started_at` on retry | Items untouchable while processing + single guarded terminal write + idempotent side-effects make a token unnecessary; accepts a slow zombie's valid result winning | §8.2 |
 | `DELETE` blocked while `processing` (file items also non-interactive); worker writes AI-owned fields only and unions tags, never clobbers user edits | Removes the delete-vs-late-success race; lets the manual-add Save `PUT` coexist with the worker | §8.2 |
@@ -655,7 +650,7 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
 | Supabase data backend | ⛔ Pending | Items/projects live in-memory; REST API (§8.7) not built. Store mounts outside the auth gate ([_layout.tsx](../../app/src/store/shelf.tsx)) — must be gated on session + re-fetch on login |
 | Optimistic create + status lifecycle | ⛔ Pending | `status` enum, fast OG/oEmbed create response (§8.2) |
-| Realtime fill-in (+ polling fallback) | ⛔ Pending | Supabase Realtime subscription on non-terminal items; batched poll fallback (§8.2) |
+| Realtime fill-in | ⛔ Pending | Supabase Realtime subscription on non-terminal items; reconcile GETs as the safety net, no polling (§8.2) |
 | Per-user dedup | ⛔ Pending | `unique (user_id, normalized_url)`; idempotent `POST /items`; URL normalisation (§8.3) |
 | Semantic search (embeddings) | ⛔ Pending | pgvector + OpenAI `text-embedding-3-small` not built (§8.6) |
 | AI auto-tagging | ⛔ Pending | 10-tag generation not built; tags come from mock data (§8.5) |
