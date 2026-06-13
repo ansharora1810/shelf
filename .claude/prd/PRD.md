@@ -88,11 +88,11 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
   - **Websites:** title, thumbnail, full page text (for AI tagging only), meta description
   - **YouTube:** title, thumbnail, description + transcript (unofficial API, async)
   - **Instagram:** caption + thumbnail (HTML scraping, accepted fragility — public posts only)
-- AI auto-tagging: 10 tags per item, user can add more manually
+- AI auto-tagging: 10 tags per item, user can add more manually (worker outputs `name`, `summary`, `tags`, `consume_time`)
 - Every item auto-assigned `#all` tag
 - Project organisation (optional — items are first-class without a project)
-- Semantic search via embeddings (pgvector, Supabase)
-- Per-item reminder toggle (push notification)
+- **Keyword search** (client-side over `name` / `tags` / `summary`)
+- Per-item reminder toggle — **stored** (`reminder_enabled`); notification delivery is v2
 - Top 5 tags by frequency in tab bar
 - Per-user deduplication (a user can't hold the same URL twice)
 - Warm, spacious UI
@@ -101,6 +101,10 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 
 | Feature | Reason deferred |
 |---|---|
+| Semantic search (embeddings) | v1 search is client-side keyword over `name`/`tags`/`summary`. v2 adds embedding generation, pgvector, and a `POST /search` endpoint (§8.6). |
+| Embedding generation + re-embed-on-edit | No embeddings in v1 (search is keyword). The worker generates them and the edit-triggered re-embed only ship with semantic search (§8.6). `raw_content` is still stored in v1 as the future base. |
+| Failure retry (`reprocess`) | v1: a `failed` item offers **Remove** (re-add manually). The reprocess endpoint + re-invoke path are v2 (§8.2, §8.7). |
+| Reminder notification delivery | v1 stores the toggle only; scheduling/delivery (local or push) is v2 (§8.5). |
 | Image & PDF items | URL-kind items first; images/PDFs add upload UI, file limits, PDF text extraction, image vision-for-tagging. Data model keeps a generic `type` so they slot in later. When built, files go to **Supabase Storage** (not raw S3 — stays in one platform, integrates with RLS/auth). |
 | Global dedup | v1 dedups per-user only. v2: if any user already processed a URL, copy the processed result instead of re-parsing (§8.3). |
 | Read-only link sharing | Nice, not core to the save→find→consume loop |
@@ -212,7 +216,8 @@ Summary is AI-generated and not shown here — it fills in on the item later.
 - All tags as flowing wrap of pill chips — tap to filter. Doubles as the tag browser for tags not surfaced in the top-5 tab bar.
 
 **Results state (query typed):**
-- Semantic search results (embeddings — soy surfaces soya)
+- **v1: client-side keyword match** over `name` / `tags` / `summary` of the already-loaded items (no backend call).
+- **v2: semantic results** (embeddings — soy surfaces soya) via `POST /search` (§8.6).
 - Same card format as main feed (thumbnail + name + source icon + tags)
 - Results update as user types (debounced)
 
@@ -269,7 +274,7 @@ Triggered by tapping a project card from the Projects tab.
 **Body:**
 - Items in this project grouped by week in descending order
 - Same 2.5-column horizontal scroll rows as the tag feed
-- Same card format: thumbnail + consume-time badge (hidden when blank) + colour-split title
+- Same card format: thumbnail + consume-time badge (hidden when blank) + title (`name`)
 
 **FAB:** `+` bottom right — opens manual add flow with this project pre-selected.
 
@@ -279,7 +284,7 @@ Opens a bottom sheet (same pattern as create project):
 - "Edit project" label
 - Rename text input (pre-filled with current name)
 - "Save" button
-- Red "Delete project" option below Save
+- Red "Delete project" option below Save → confirmation asks **whether to also delete the items** in the project, or keep them (they become project-less). The choice maps to the `delete_items` flag on `DELETE /projects/:id` (§8.7).
 
 **Empty state:** "No items in this project yet." + add item prompt.
 
@@ -299,7 +304,7 @@ The iOS share extension is how items enter Shelf from other apps (Safari, TikTok
 1. Reads the user's JWT from the shared **App Group** container (written there by the main app on login)
 2. POSTs the URL (+ optional `project_id`) to the backend `POST /items` endpoint
 3. Dismisses immediately (~200ms; no AI wait)
-4. Backend asynchronously parses content, runs AI tagging, generates the embedding, and advances the item to a terminal status
+4. Backend asynchronously parses content, runs AI tagging/summary, and advances the item to a terminal status (embedding in v2)
 5. The item appears in the main app via Realtime (if open) or its next fetch
 
 **Not-signed-in edge case:** If the App Group has no JWT (user shared a link before ever signing in), the sheet shows "Open Shelf to sign in first" instead of the save UI.
@@ -347,7 +352,7 @@ flowchart LR
   E -->|Save| F[POST /items\nusing App Group JWT]
   E -->|Dismiss| G[Discarded]
   F --> H[Dismiss to host app]
-  F -.async.-> I[Backend: parse + tag\n+ embed + finalise]
+  F -.async.-> I[Backend: parse + tag\n+ summary + finalise]
   I -.-> J[Item ready via Realtime\nor next app open]
 ```
 
@@ -376,7 +381,7 @@ flowchart LR
   B --> C[Search screen\nbrowse all tags]
   C --> D{User action}
   D -->|Tap tag| E[Filtered tag view]
-  D -->|Type query| F[Semantic results]
+  D -->|Type query| F[Keyword results\nsemantic in v2]
   E --> G[Item detail]
   F --> G
 ```
@@ -406,8 +411,8 @@ flowchart LR
 | `summary` | No | AI-generated |
 | `thumbnail_url` | No | From OG/Twitter tags or oEmbed; may arrive in the fast create response |
 | `consume_time` | No | Estimated time to consume, in **seconds** (read / watch / listen). Derived during processing (§8.4). `null` when not applicable or unknown; UI hides the badge when blank |
-| `embedding` | Derived | `raw_content + current name + current tags` → one vector; regenerated when name or tags change; last artifact produced (item not searchable until `ready`) |
-| `project_id` | Yes | Optional; FK → `projects.id` |
+| `embedding` | Derived (**v2**) | `raw_content + current name + current tags` → one vector. Not generated in v1 (search is client-side keyword, §8.6) |
+| `project_id` | Yes | Optional; FK → `projects.id`. On project delete, either the items are deleted or `project_id` is set null, per the `delete_items` flag (§8.7) |
 | `reminder_enabled` | Yes | Push notification toggle |
 | `source` | No | `instagram` / `youtube` / `website`. Anything outside YouTube/Instagram (TikTok, X, etc.) classifies as `website` in v1 — no dedicated parse strategy (§8.4) |
 | `created_at` | No | Save timestamp; drives the week-grouped feed |
@@ -431,13 +436,13 @@ Items are created optimistically and enriched asynchronously. The user never wai
 
 **Create (fast path, < 2s):**
 - `POST /items` with the URL creates the row at `status: 'processing'` and returns it straight away with the **non-AI** fields it can resolve within a hard timeout: `source`, `title`, `thumbnail_url`, `consume_time` (and `raw_content`). A slow origin returns whatever arrived rather than blocking; the rest fills in via enrichment.
-- **AI fields are always async** — `tags`, `summary`, `embedding` (and the YouTube transcript that feeds them) are produced by the worker, never awaited on create.
+- **AI fields are always async** — `tags`, `summary` (and the YouTube transcript that feeds them; `embedding` in v2) are produced by the worker, never awaited on create.
 - **Manual add** (in-app `+`): the create response populates a confirm popup (§6.3); the item enters the feed on Save. **Share / file**: the item enters the feed immediately, no popup. Either way, AI fields stream in later via Realtime.
 
 **Status lifecycle (the "complete" mechanism):**
 - `awaiting_upload` → file-upload items only (v2): row created and presigned URL issued, file not yet in storage. URL items skip this and start at `processing`.
-- `processing` → enrichment underway (content fetch, AI tag, summary, embedding)
-- `ready` → terminal; fully enriched, semantically searchable
+- `processing` → enrichment underway (content fetch, AI `name`/`summary`/`tags`/`consume_time`; embedding is v2)
+- `ready` → terminal; fully enriched
 - `failed` → terminal; could not produce a usable item (URL unreachable, or a file upload that never completed / is corrupt)
 - "Complete" = any **terminal** state (`ready` / `failed`). The client stops watching an item once terminal.
 - **No `partial` state.** Enrichment degrades gracefully and still lands at `ready`: a missing YouTube transcript falls back to the description; if AI tagging fails after retries the item keeps `#all` + whatever was parsed and the user can add tags manually. `failed` is reserved for "nothing usable was produced."
@@ -461,14 +466,15 @@ The client only ever *reflects* a backend status; it never decides "failed" on a
   - Watchdog: `UPDATE … SET status='failed' WHERE id = ? AND status = 'processing' AND now() > processing_started_at + deadline`
   - Retry (reprocess): `UPDATE … SET status='processing', processing_started_at = now() WHERE id = ? AND status = 'failed'`
   - A late "zombie" worker from a timed-out attempt finds the row no longer `processing` and no-ops. A retry re-enters `processing` and **resets `processing_started_at`** (else the watchdog instantly re-fails it). Accepted trade-off: with no token, a slow-but-healthy zombie's (valid) result can win over a retry's — fine for idempotent same-input reprocessing.
-  - The worker writes **AI-owned fields only** (`summary`, `embedding`, and **unions** AI tags with any user tags); it never clobbers user-set `name`/tags. This keeps the manual-add Save (a `PUT` during `processing`) and the worker's write from racing destructively.
+  - The worker writes **AI-owned fields only** (`name`/`summary` when unset, and **unions** AI tags with any user tags; `embedding` is v2); it never clobbers user-set `name`/tags. This keeps the manual-add Save (a `PUT` during `processing`) and the worker's write from racing destructively.
+  - The `failed → processing` retry guard above is the **reprocess** path, which is **v2**. In v1 a `failed` item is terminal with no retry (Remove + re-add).
 - **`DELETE` is blocked while `processing`** for every item — removes the delete-vs-late-success race; an item can only be deleted once terminal. **File items are additionally non-interactive** (skeleton, not clickable/openable) until terminal. The manual-add Save `PUT` is the creation completing and is allowed.
-- **Retry is a dedicated endpoint** (`POST /items/:id/reprocess`, §8.7), not the create endpoint — create mints a new id and would duplicate. Capped (default 2, tunable); after the cap the failed item offers an explicit **Remove** (user-initiated; nothing auto-deletes).
+- **Retry (`POST /items/:id/reprocess`) is v2** (§8.7) — when built it's a dedicated endpoint, not create (which mints a new id and would duplicate), capped (default 2, tunable). **v1:** a failed item offers **Remove** only.
 
 **Client states on a card / detail:**
 - `processing`: skeleton fill-in for the not-yet-arrived fields; a soft "taking a while…" hint after ~30–45s (cosmetic only — never a failure verdict or destructive action).
 - `ready`: normal item.
-- `failed`: a failure affordance with **Try again** (calls reprocess) up to the cap, then **Remove**.
+- `failed`: a failure affordance — **v1: Remove**; **v2** adds **Try again** (calls reprocess, up to the cap) before Remove.
 
 ### 8.3 Deduplication
 
@@ -502,28 +508,36 @@ The client only ever *reflects* a backend status; it never decides "failed" on a
 ### 8.5 AI tagging & share extension architecture
 
 **AI tagging:**
-- LLM API call per saved item. 10 tags returned. Dirt cheap — fractions of a cent per item.
-- **Always async** across every entry point (manual add, share, file). The worker generates tags/summary/embedding after create; they stream into the item via Realtime. Manual add lets the user add their own tags in the popup (§6.3); the AI tags merge in when ready.
+- LLM API call per saved item. Worker outputs `name`, `summary`, and 10 `tags` (and `consume_time`). Dirt cheap — fractions of a cent per item. (Embedding generation is **v2** — §8.6.)
+- **Always async** across every entry point (manual add, share, file). The worker generates the fields after create; they stream into the item via Realtime. Manual add lets the user add their own tags in the popup (§6.3); the AI tags merge in when ready.
+
+**Reminders:** v1 stores the per-item `reminder_enabled` toggle only. Scheduling and delivery (local notification vs server push) are **v2** — nothing fires a notification in v1.
 
 **Share extension architecture:**
 - The extension is a separate process and cannot access the main app's Supabase session directly.
 - **App Group** shared container bridges them: the main app writes the user's JWT (access + refresh token) to the App Group on login and on token refresh; the extension reads it when it needs to make an authenticated call.
 - On Save, the extension POSTs `{ url, project_id? }` to `POST /items` using the App Group JWT, then dismisses (~200ms, no AI wait).
-- The backend treats a share-created item as a processing job: parse content → AI tag → embed → advance to terminal status. The main app picks it up via Realtime (if open) or its next `GET /items`.
+- The backend treats a share-created item as a processing job: parse content → AI `name`/`tags`/`summary`/`consume_time` → advance to terminal status (embedding in v2). The main app picks it up via Realtime (if open) or its next `GET /items`.
 - If the App Group has no JWT (link shared before first sign-in), the extension shows a "Open Shelf to sign in first" message rather than the save UI.
+- The main app auto-refreshes its access token (`autoRefreshToken`) and writes the latest tokens to the App Group. But the extension is a separate process without that refresh loop, and access tokens last ~1h — so if the access token from the App Group is expired, the extension **refreshes it itself using the stored refresh token** before calling `POST /items`, rather than failing.
 
-### 8.6 Semantic search
+### 8.6 Search
 
-- **Embeddings:** OpenAI `text-embedding-3-small` → pgvector on Supabase.
-- **Index:** HNSW for sub-50ms query speed at any realistic per-user scale.
-- **What gets embedded:** `raw_content + current name + current tags` concatenated into one vector per item.
-- **Re-embedding on edit:** **Async**, not synchronous. `PUT /items/:id` is direct-to-Supabase (no server hook, and the client has no OpenAI key), so a name/tag edit fires a Postgres trigger → pg_net → the worker in `reembed` mode, which regenerates only the embedding (~300ms of work, a few seconds after save). Consequence: brief **search staleness** — for those seconds, search uses the old vector. Harmless here. The trigger is guarded to fire only on user edits (name/tags changed, `embedding` unchanged), so the worker's own terminal write doesn't self-trigger a redundant re-embed (§8.9).
-- **`raw_content` field:** Immutable, stored permanently per item, used as the base for all future embedding generations. Never overwritten.
+**v1 — keyword (client-side).** Search runs entirely on the device over the already-loaded items: case-insensitive substring/keyword match against `name`, `tags`, and `summary`. No backend call, no endpoint, no embeddings. (This is the current frontend behaviour — promote it from stand-in to the v1 mechanism.)
+
+**v2 — semantic (deferred).** The differentiator (soy surfaces soya):
+
+- **Embeddings:** OpenAI `text-embedding-3-small` → pgvector on Supabase; HNSW index for sub-50ms queries.
+- **What gets embedded:** `raw_content + current name + current tags` per item. The worker generates it; `raw_content` (already stored in v1) is the immutable base, so v2 needs no re-fetch.
+- **Search endpoint:** `POST /search { query }` (Lambda) — embeds the query (OpenAI key is server-side only), runs the pgvector similarity query, returns items.
+- **Re-embed on edit:** async — a name/tag edit fires a Postgres trigger → pg_net → the worker in `reembed` mode (regenerates only the embedding), guarded so the worker's own write doesn't self-trigger. Brief, harmless search staleness.
 - **Website search scope:** tags + title only, not raw page text.
+
+`raw_content` is stored immutably in **v1** even though nothing reads it yet, so v2 embeddings (and global dedup, §8.3) drop in without re-fetching.
 
 ### 8.7 API surface
 
-Most of the surface is **not** a hand-written endpoint — the app calls Supabase directly and **RLS** (`user_id = auth.uid()`) enforces ownership. Only the two rows marked **Lambda** are backend functions (§8.9).
+Most of the surface is **not** a hand-written endpoint — the app calls Supabase directly and **RLS** (`user_id = auth.uid()`) enforces ownership. In **v1 only `POST /items` is a backend (Lambda) function**; `reprocess` and `POST /search` are v2 (§8.9).
 
 | Method | Endpoint | Where | Purpose |
 |---|---|---|---|
@@ -531,10 +545,11 @@ Most of the surface is **not** a hand-written endpoint — the app calls Supabas
 | GET | `/projects` | Direct + RLS | Load all projects on open (catches empty projects) |
 | POST | `/items` | **Lambda** | **Create** — body branches on kind. **Link:** `{ url, project_id? }` → fast non-AI enrichment (`source`, `title`, `thumbnail_url`, `consume_time`), row at `processing`, returns the entity; idempotent on `normalized_url` collision (§8.3). **File (v2):** `{ type, filetype, size, project_id? }` (app pre-validates) → row at `awaiting_upload`, returns `{ id, upload_url }` (presigned PUT, 3-min TTL, type/size-constrained, id in object key). See §8.8 |
 | PUT | `/items/:id` | Direct + RLS | **Update** — manual-add Save (user tags / project / name) and later edits. A name/tag change fires the async re-embed trigger (§8.6) |
-| POST | `/items/:id/reprocess` | **Lambda** | **Retry** a `failed` item (§8.2). Guarded `failed → processing`, resets `processing_started_at`, re-invokes the worker. Artifact present (file in storage / link URL) → just re-invoke; a file upload that never landed → returns a fresh `{ upload_url }` and sets `awaiting_upload` so the app re-uploads |
+| POST | `/items/:id/reprocess` | **Lambda (v2)** | **Retry** a `failed` item (§8.2). Guarded `failed → processing`, resets `processing_started_at`, re-invokes the worker. Artifact present (file in storage / link URL) → just re-invoke; a file upload that never landed → returns a fresh `{ upload_url }` and sets `awaiting_upload` so the app re-uploads. **v1 has no retry** (failed → Remove) |
+| POST | `/search` | **Lambda (v2)** | Semantic search — embeds the query, pgvector similarity, returns items (§8.6). **v1 search is client-side keyword, no endpoint** |
 | POST | `/projects` | Direct + RLS | Upsert project — create (no id) or update (id present) |
 | DELETE | `/items/:id` | Direct + RLS | Delete an item (rejected while `processing` — items are untouchable until terminal, §8.2) |
-| DELETE | `/projects/:id` | Direct + RLS | Delete a project |
+| DELETE | `/projects/:id` | Direct + RLS | Delete a project. Body `{ delete_items: bool }` — `true` deletes the project's items; `false` orphans them (`project_id → null`). The app prompts the user to choose (§6.9) |
 
 Synchronous failures of `POST /items` (create) and of the direct upload PUT are surfaced to the user as a **"try again"** error before any item is committed to the feed.
 
@@ -554,7 +569,7 @@ Both kinds of item — URL (v1) and file (v2, deferred) — share one processing
 **URL item — in-app manual add (v1):**
 1. App `POST /items { url, project_id? }`. Backend dedups (§8.3), does fast non-AI enrichment (`source`, `title`, `thumbnail_url`, `consume_time`), creates the row at `processing`, fires the worker via pg_net, returns the entity. Create error → "try again" (nothing enters the feed).
 2. The add-link popup (§6.3) expands with those fields; user optionally adds tags/project → **Save** → `PUT /items/:id` writes the user fields. The item now enters the feed (AI fields in skeleton).
-3. Worker: parse content → AI tags/summary → embed → guarded terminal write to `ready` (or `failed`).
+3. Worker (`process` mode): parse content → AI `name`/`tags`/`summary`/`consume_time` → guarded terminal write to `ready` (or `failed`). (Embedding is added here in v2 — §8.6.)
 4. Realtime pushes the finished row; the app fills it in (or shows the failure affordance). Foreground/reconnect GET is the safety net.
 
 **URL item — share extension (v1):** same backend path, but the extension `POST /items` after the optional-project step and dismisses — no popup, no `PUT`; the item enters the feed and fills in via Realtime / next fetch (§6.10).
@@ -566,9 +581,10 @@ Both kinds of item — URL (v1) and file (v2, deferred) — share one processing
 4. A trigger on the `storage.objects` insert fires the worker via pg_net with the id from the key.
 5. Worker processes as above → `ready` / `failed`; Realtime fills in or shows failure.
 
-**Retry (both kinds) — `POST /items/:id/reprocess`** (§8.2, §8.7):
+**Retry (both kinds) — `POST /items/:id/reprocess`** — **v2** (§8.2, §8.7). When built:
 - Artifact present (file in storage / link URL): guarded `failed → processing`, reset `processing_started_at`, re-invoke the worker. No re-upload.
 - File upload never landed: endpoint returns a fresh `{ upload_url }` and sets `awaiting_upload`; the app re-uploads (→ storage trigger → worker).
+- **v1:** a `failed` item has no retry — the user removes it and re-adds.
 
 **Orphan handling:** presigned URL expires at 3 min; items left in `awaiting_upload` past that window are swept to `failed` (the same pg_cron sweep as the watchdog) so the feed never shows a permanent skeleton.
 
@@ -580,20 +596,20 @@ Guiding constraint: **no users yet, slow scale → no ever-running infra, on-tri
 |---|---|---|
 | DB, Auth, Realtime, Storage | **Supabase** (free tier) | One platform; Postgres + pgvector + Realtime + Storage + Auth. RLS is the authz layer |
 | Plain CRUD (reads, edits, deletes, projects) | **Direct Supabase client + RLS** | No backend code or cost; JWT auto-attached, `user_id = auth.uid()` enforces ownership |
-| Smart endpoints (`POST /items`, reprocess) + worker | **Python on AWS Lambda** | Python's fetch/scrape/LLM ecosystem; scale-to-zero, large perpetual free tier; holds the OpenAI + service-role secrets |
+| Smart endpoint (`POST /items`) + worker | **Python on AWS Lambda** | Python's fetch/scrape/LLM ecosystem; scale-to-zero, large perpetual free tier; holds the OpenAI + service-role secrets. (v1 has **one** app-facing Lambda — create; `reprocess` and `POST /search` are v2.) |
 | Trigger (event → worker) | **Postgres trigger → pg_net** (async HTTP) | In-DB, no queue/poller; fires the Lambda without blocking the insert |
 | Watchdog + orphan sweep | **pg_cron** | In-DB periodic sweep; fails stuck `processing` / abandoned `awaiting_upload` rows |
 | Live updates (backend → app) | **Supabase Realtime** | Already chosen (§8.2); no polling |
 
 **Auth.** The app sends the Supabase JWT on every call. Direct-CRUD relies on RLS. The Lambda endpoints verify the JWT (Supabase JWKS, `sub` = `user_id`); the worker uses the **service-role key** (bypasses RLS — it acts for the system) and scopes every write by the job's `item_id`. Service-role + OpenAI keys live only in Lambda, never on the device.
 
-**No queue in v1.** `trigger → pg_net → Lambda` directly, no pgmq. At zero traffic a queue's buffering/retry earns nothing and adds plumbing. Retry is covered by in-invocation retries (transient errors) + the pg_cron watchdog + user reprocess. **Upgrade path:** when volume or reliability needs it, insert **pgmq** (`trigger → pgmq.send`, Lambda drained by pg_cron or an SQS-style consumer) — the worker code barely changes, and pgmq's visibility-timeout/DLQ can then own the watchdog role.
+**No queue in v1.** `trigger → pg_net → Lambda` directly, no pgmq. At zero traffic a queue's buffering/retry earns nothing and adds plumbing. Reliability is covered by in-invocation retries (transient errors) + the pg_cron watchdog (stuck → `failed`); a `failed` item is removed and re-added in v1 (the `reprocess` retry path is v2). **Upgrade path:** when volume or reliability needs it, insert **pgmq** (`trigger → pgmq.send`, Lambda drained by pg_cron or an SQS-style consumer) — the worker code barely changes, and pgmq's visibility-timeout/DLQ can then own the watchdog role.
 
 **No provisioned concurrency.** It is billed separately (no free-tier allowance) and is a fixed ~$5–11/mo always-on charge — exactly the ever-running cost we're avoiding, for near-zero benefit (the worker is cold-start-insensitive; only `POST /items`'s ~2s feel is affected, occasionally). Accept cold starts at this scale; if `create` latency ever hurts, reach for a slim zip package or Lambda **SnapStart** (Python) — both stay scale-to-zero — before PC.
 
-**Worker — one codebase, two modes** (dispatched by the `mode` in the pg_net payload):
-- `process` — full pipeline: fetch content → AI tags → summary → embed → guarded terminal write to `ready`/`failed`.
-- `reembed` — embed-only: read `raw_content` + current `name`/`tags`, regenerate just the `embedding` column. Triggered by a user name/tag edit (§8.6), guarded (`embedding` unchanged) so the worker's own write doesn't self-trigger. No re-fetch, no re-tag (which would clobber the user's edit).
+**Worker modes** (dispatched by the `mode` in the pg_net payload):
+- `process` (**v1**) — pipeline: fetch content → AI `name`/`tags`/`summary`/`consume_time` → guarded terminal write to `ready`/`failed`. (Embedding generation is added to this mode in v2.)
+- `reembed` (**v2**) — embed-only: read `raw_content` + current `name`/`tags`, regenerate just the `embedding` column. Triggered by a user name/tag edit (§8.6), guarded (`embedding` unchanged) so the worker's own write doesn't self-trigger. Ships with semantic search.
 
 **Cold-start caveat:** `POST /items` does a live OG-tag fetch under a ~1.5s timeout; a Lambda cold start (~1–2s) on top could occasionally exceed the 2s feel. Tolerable solo; if needed, move only `create` to a fast-cold-start Deno edge function (one TS file) while the worker stays Python.
 
@@ -635,34 +651,38 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Project detail header: `←` \| name \| `✏️` + `📅`; tag taps go to global tag view | Project-scoped search dropped — search is global | §6.9 |
 | Add-link popup (manual add only): shows returned non-AI fields (source/title/consume-time), optional tags/project, Save → `PUT /items/:id`; no AI wait, AI fields stream in after | Share extension uses its own compact sheet; files skip the popup. Replaces the old "wait for AI then review pre-filled tags" overlay | §6.3 |
 | Item detail: parallax thumbnail (tap→URL), name/source/summary/tags/reminder, persistent Open + Delete | — | §6.4 |
-| Search: tag-pill browser empty state + debounced semantic results; doubles as browser for non-top-5 tags | — | §6.5 |
+| Search: tag-pill browser empty state + debounced results (v1 client-side keyword over name/tags/summary; semantic v2); doubles as browser for non-top-5 tags | — | §6.5, §8.6 |
 | Create/edit project: bottom sheet, 20-char limit, title-cased | — | §6.6, §6.9 |
 
 ### Technical
 | Decision | Rationale | Ref |
 |---|---|---|
 | Optimistic create: `POST /items` returns immediately at `processing` with non-AI fields (source/title/thumbnail/consume-time); AI always async | User never waits on AI; item shows instantly | §8.2 |
-| Endpoints: `POST /items` create (one endpoint, body branches link vs file — file returns id + presigned URL), `PUT /items/:id` update, `POST /items/:id/reprocess` retry | One create endpoint for both kinds; create/update separated; POST (not GET) since create writes a row | §8.7 |
+| Endpoints — **v1:** `POST /items` create (one endpoint, body branches link vs file) + `PUT /items/:id` update (direct+RLS). **v2:** `POST /items/:id/reprocess`, `POST /search` | One create endpoint for both kinds; create/update separated; POST (not GET) since create writes a row | §8.7 |
 | `status` enum: `awaiting_upload` (file uploads) → `processing` → terminal `ready`/`failed`; no `partial` | Enrichment degrades gracefully to `ready`; `failed` = nothing usable produced. Simpler than carrying a partial state nothing branches on | §8.2 |
 | Supabase Realtime is the only live-update mechanism (no polling); reconcile GETs (incl. on Realtime re-subscribe) are the safety net | Instant fill-in without a polling loop; reconcile covers any missed push | §8.2 |
 | Backend owns failure via a watchdog (deadline > P99); client never declares failure on a timer | Avoids client/backend split-brain (success-after-client-gave-up); bounds the skeleton | §8.2 |
 | No attempt/fencing token; guard terminal writes on `WHERE status='processing'`, reset `processing_started_at` on retry | Items untouchable while processing + single guarded terminal write + idempotent side-effects make a token unnecessary; accepts a slow zombie's valid result winning | §8.2 |
 | `DELETE` blocked while `processing` (file items also non-interactive); worker writes AI-owned fields only and unions tags, never clobbers user edits | Removes the delete-vs-late-success race; lets the manual-add Save `PUT` coexist with the worker | §8.2 |
-| Retry via dedicated `POST /items/:id/reprocess` (not create); capped (default 2) then Remove; nothing auto-deletes | Create mints a new id (would duplicate); no destructive auto-action | §8.2, §8.7 |
+| Retry (`POST /items/:id/reprocess`) is **v2** — dedicated endpoint (not create), capped (default 2) then Remove. **v1:** failed → Remove + re-add | Create mints a new id (would duplicate); no destructive auto-action | §8.2, §8.7 |
 | Worker trigger decoupled from source: link insert / storage insert / reprocess all invoke the worker via pg_net (no queue v1) | Lets retry re-run without re-upload; worker is trigger-agnostic | §8.8, §8.9 |
 | File upload (v2): Supabase Storage presigned PUT (3-min TTL, id in object key, type/size constrained); reprocess re-issues a URL only if the upload never landed | One platform, S3-backed; idempotent retry handling both failure stages | §8.8 |
 | Optimistic, non-clickable skeleton until terminal; soft "taking a while" hint at ~30–45s; create/upload errors → "try again" | Instant feedback; comfort without a false failure verdict | §8.2, §8.8 |
 | Fetch on session-acquired + foreground + network reconnect; no background polling; gate on session, re-fetch on login | Resource-cheap; safety-net reconcile across every resume path | §8.2 |
 | Per-user dedup: `unique (user_id, normalized_url)`, idempotent POST, conservative normalisation | Idempotency keeps both callers simple; conservative norm avoids merging distinct content | §8.3 |
 | Re-add files into a chosen project only if item has none | Never silently move an already-filed item | §8.3 |
-| Embeddings: `text-embedding-3-small` → pgvector, HNSW; re-embed synchronously (~300ms) on name/tag edit | Sub-50ms search; cheap re-embed | §8.6 |
+| Semantic search is **v2**: `text-embedding-3-small` → pgvector/HNSW, `POST /search`, async re-embed-on-edit. **v1 = client-side keyword** (name/tags/summary). No embeddings generated in v1; `raw_content` still stored as the v2 base | Ship the cheap search first; embeddings are the differentiator but not v1-critical | §8.6 |
+| AI worker outputs `name`/`summary`/`tags`/`consume_time` (no `descriptor`/`title` split); card shows `name`, summary on detail — colour-split dropped, frontend renames `title`→`name`, `descriptor`→`summary` | DB model is final; one shape, no structured split to maintain | §8.1, §6.2 |
+| Reminder: **v1 stores the toggle** (`reminder_enabled`); scheduling/delivery (local vs push) is **v2** | Ship the field now; defer notification plumbing | §5, §8.5 |
+| Project delete asks **delete items vs orphan** (`delete_items` flag on `DELETE /projects/:id`) | User decides; FK behaviour follows the flag (delete or set-null) | §6.9, §8.7 |
+| Share extension self-refreshes its JWT via the App Group refresh token if the access token is stale | The extension doesn't run the main app's auto-refresh loop; the access token may be >1h old | §6.10, §8.9 |
 | Two tables (`items`, `projects`), both `user_id`-scoped (RLS); `linkCount`/membership derived client-side, not stored | Minimal schema; counts can't drift from the item list | §8.1 |
-| Stack: Supabase (DB/Auth/Realtime/Storage, free tier) + direct-client/RLS for CRUD + Python on AWS Lambda for the 2 smart endpoints & worker | No-users / slow-scale: scale-to-zero, on-trigger cost, free tier; Python for the fetch/scrape/LLM ecosystem | §8.9 |
-| Only `POST /items` (create) and `POST /items/:id/reprocess` are backend functions; everything else is direct-to-Supabase + RLS | Server code only where there's an outbound fetch, a secret, or a lifecycle transition; minimal surface | §8.7, §8.9 |
+| Stack: Supabase (DB/Auth/Realtime/Storage, free tier) + direct-client/RLS for CRUD + Python on AWS Lambda for the smart endpoint(s) & worker | No-users / slow-scale: scale-to-zero, on-trigger cost, free tier; Python for the fetch/scrape/LLM ecosystem | §8.9 |
+| v1 backend = **one** Lambda (`POST /items` create) + worker; everything else is direct-to-Supabase + RLS. `reprocess` and `POST /search` are v2 | Server code only where there's an outbound fetch, a secret, or a lifecycle transition; minimal surface | §8.7, §8.9 |
 | Trigger → pg_net → Lambda; pg_cron watchdog; **no queue in v1** (pgmq is the documented upgrade) | A queue earns nothing at zero traffic; retry covered by in-invocation + watchdog + reprocess | §8.8, §8.9 |
 | **No provisioned concurrency** — accept cold starts; SnapStart/slim-package if `create` latency hurts | PC is a fixed ~$5–11/mo always-on charge (no free tier) for near-zero benefit | §8.9 |
-| Worker is one codebase, two modes: `process` (full) / `reembed` (embed-only) | Re-embed shares the worker without re-running the pipeline or clobbering user tags | §8.6, §8.9 |
-| Re-embed on edit is **async** (trigger → worker), not synchronous | `PUT` is direct-to-Supabase (no server hook, no client key); a few seconds of search staleness is harmless | §8.6 |
+| Worker modes: `process` (v1) / `reembed` (v2, embed-only) — one codebase | Re-embed shares the worker without re-running the pipeline or clobbering user tags | §8.6, §8.9 |
+| Re-embed on edit (v2) is **async** (trigger → worker), not synchronous | `PUT` is direct-to-Supabase (no server hook, no client key); a few seconds of search staleness is harmless | §8.6 |
 | `source` = `youtube`/`instagram`/`website`; everything else (incl. TikTok) is `website` in v1; keep the field (backend-authoritative classifier, remove client `inferSource` on build) | No dedicated TikTok parse in v1; one classifier not two | §8.1, §8.4 |
 | `raw_content` immutable, user-agnostic, embedding base | Stable base; enables future global dedup | §8.1, §8.6 |
 | `consume_time` as integer seconds, formatted client-side, badge hidden when blank | Media-agnostic (read/watch/listen); sortable/locale-flexible vs a pre-formatted string; no empty pills | §8.1, §8.4, §6.2 |
@@ -692,20 +712,23 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | Calendar / date filter | ✅ Done | Marks days with items; day grid; clears on toggle |
 | Item detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
 | Add item / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
-| Search screen | 🟡 Partial | Tag browser + live results built; matching is a **local substring stand-in**, not semantic |
-| Reminder toggle | 🟡 Partial | UI toggle only — no notification delivery wired |
+| Search screen (v1 keyword) | 🟡 Partial | Tag browser + live keyword results over name/tags/summary built — **this is the v1 mechanism** (no longer a stand-in); needs to point at real data. Semantic is v2 (§8.6) |
+| Reminder toggle | 🟡 Partial | UI toggle built; v1 only persists `reminder_enabled` — notification delivery is **v2** (§8.5) |
+| Card title rename (`title`→`name`, drop colour-split) | ⛔ Pending | Frontend uses `descriptor`/`title` split; DB model is `name`/`summary`/`tags`. Rename fields, show `name` on the card, drop the two-tone split (§8.1, §6.2) |
 | Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
 | Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
 | Supabase schema + RLS | ⛔ Pending | `items` + `projects` tables, `user_id`-scoped RLS; direct-client CRUD wiring. Store mounts outside the auth gate ([_layout.tsx](../../app/src/store/shelf.tsx)) — must be gated on session + re-fetch on login |
-| Backend functions (AWS Lambda, Python) | ⛔ Pending | `POST /items` (create + enrichment) and `POST /items/:id/reprocess`; JWT verify (§8.7, §8.9) |
-| Worker (AWS Lambda, Python) | ⛔ Pending | `process` + `reembed` modes; pg_net trigger; pg_cron watchdog; service-role writes (§8.9) |
+| Backend function (AWS Lambda, Python) | ⛔ Pending | v1: `POST /items` (create + enrichment), JWT verify (§8.7, §8.9). `reprocess` + `POST /search` are v2 |
+| Worker (AWS Lambda, Python) | ⛔ Pending | v1: `process` mode (no embedding); pg_net trigger; pg_cron watchdog; service-role writes. `reembed` mode is v2 (§8.9) |
 | Optimistic create + status lifecycle | ⛔ Pending | `status` enum, fast OG/oEmbed create response (§8.2) |
 | Realtime fill-in | ⛔ Pending | Supabase Realtime subscription on non-terminal items; reconcile GETs as the safety net, no polling (§8.2) |
 | Per-user dedup | ⛔ Pending | `unique (user_id, normalized_url)`; idempotent `POST /items`; URL normalisation (§8.3) |
-| Semantic search (embeddings) | ⛔ Pending | pgvector + OpenAI `text-embedding-3-small` not built (§8.6) |
-| AI auto-tagging | ⛔ Pending | 10-tag generation not built; tags come from mock data (§8.5) |
+| AI tagging (name/summary/tags/consume_time) | ⛔ Pending | Worker LLM call not built; fields come from mock data (§8.5). LLM model TBD |
 | Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch (§8.4) |
-| `raw_content` / `embedding` fields | ⛔ Pending | Not in the frontend model; re-embed-on-edit not built |
+| `raw_content` field | ⛔ Pending | Stored immutably in v1 as the v2-embedding base; not in the frontend model |
+| Semantic search + embeddings (v2) | ⛔ v2 | pgvector, `text-embedding-3-small`, `POST /search`, `reembed` (§8.6) |
+| Failure retry / `reprocess` (v2) | ⛔ v2 | v1 failed → Remove; reprocess endpoint + Try-again deferred (§8.2) |
+| Reminder delivery (v2) | ⛔ v2 | v1 stores toggle only; scheduling/notification deferred (§8.5) |
 | `consume_time` field | 🟡 Partial | Frontend renamed `duration` → `consumeTime`; badge hidden when blank (§6.2) ✅. Still a mock-only `string` (e.g. `'12m'`) — convert to int seconds + client-side formatter and derive on backend (§8.4) ⛔ |
 | iOS share extension | ⛔ Pending | In-place sheet (URL + optional project) → `POST /items` via App Group JWT → backend async processing (§6.10, §8.5) |
 | Push notification reminders | ⛔ Pending | No `expo-notifications` integration |

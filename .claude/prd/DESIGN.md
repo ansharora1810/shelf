@@ -11,7 +11,7 @@ Design decisions for frontend implementation. Derived from the PRD and the inspi
 | `background` | `#F2EDE4` | App background (warm cream) |
 | `surface` | `#FFFFFF` | Cards, nav bar, bottom sheets |
 | `primary` | `#2D4A35` | Headings, body text, nav icons |
-| `accent` | `#C4532A` | Descriptor words in titles, tab underline, badges, counts |
+| `accent` | `#C4532A` | Tab underline, badges, counts |
 | `text-secondary` | `#8A8A8A` | Inactive tab labels, metadata |
 | `badge-bg` | `#F2EDE4` | Time/source badge pill background (matches app background) |
 
@@ -25,13 +25,12 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 |---|---|---|---|---|
 | Screen title (e.g. "Shelf") | Playfair Display | Regular (400) | 30px | Sentence |
 | Section header (e.g. "Recent") | Playfair Display | Regular (400) | 22px | Sentence |
-| Card title — descriptor word | Playfair Display | Regular (400) | 13px | Sentence |
-| Card title — main words | Playfair Display | Regular (400) | 13px | Sentence |
+| Card title (`name`) | Playfair Display | Regular (400) | 13px | Sentence |
 | Tab label | Inter | Medium (500) | 11px | Upper |
 | Count / metadata (e.g. "20 SAVED") | Inter | Medium (500) | 11px | Upper |
 | Badge label (e.g. "40m") | Inter | Regular (400) | 10px | — |
 
-**Card title colour split:** the descriptor/tag word(s) render in `accent`, the remainder in `primary`. This requires the AI to return title parts in a structured format — e.g. `{ descriptor: "high-protein", title: "pav bhaji" }`.
+**Card title:** the card shows the item `name` in `primary` (single colour — the earlier accent/`primary` "descriptor split" is dropped; the AI returns `name`/`summary`/`tags`, not structured title parts). `summary` appears on the item detail screen, not the card.
 
 **Font loading:** `expo-font` + `@expo-google-fonts/playfair-display` + `@expo-google-fonts/inter`.
 
@@ -62,8 +61,8 @@ Two typefaces: a serif for content, a sans-serif for UI chrome.
 ### Card
 
 - Image fills card with `borderRadius: 12`, aspect ratio ~1:1
-- Badge (bottom-left, absolute): cream pill, clock icon + duration in `accent`
-- Title below image: descriptor word(s) in `accent`, rest in `primary`
+- Badge (bottom-left, absolute): cream pill, clock icon + `consume_time` in `accent` (hidden when blank)
+- Title below image: item `name` in `primary` (single colour)
 - No card background — sits directly on app background
 
 ### Section header row
