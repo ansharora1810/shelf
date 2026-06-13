@@ -61,7 +61,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 - Scroll bar on projects view shrinks with a bouncy animation at scroll extremes
 - Item detail thumbnail shrinks slightly as user scrolls up (parallax)
 - Create project bottom sheet slides up from bottom
-- Post-processing overlay slides up after loading spinner completes
+- Add-link popup expands in place once the create call returns
 - Tab switch: smooth horizontal slide
 
 ---
@@ -146,6 +146,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 - Items grouped by week in descending order
 - Each week group: 2.5-column horizontal scroll row
 - Each card: thumbnail + name + source platform icon, plus a consume-time badge (clock icon + formatted `consume_time`, e.g. "12m") overlaid on the thumbnail. The badge is **hidden when `consume_time` is blank/`null`** — never render an empty pill.
+- Card reflects item `status` (§8.2): `processing` → skeleton fill-in (non-clickable for file items until terminal), with a soft "taking a while…" hint after ~30–45s; `failed` → failure affordance with **Try again** (→ reprocess) then **Remove**; `ready` → normal card.
 
 **Calendar / date filter:**
 - The `📅` icon opens a calendar bottom sheet; days that have saved items are marked
@@ -157,22 +158,27 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 
 ---
 
-### 6.3 Post-processing overlay
+### 6.3 Add-link popup
 
 ![Post-processing overlay wireframe](assets/wireframe-post-processing.png)
 
-Triggered after loading spinner on **manual add** (in-app `+` flow). Slides up as an overlay on the current screen. The share extension does **not** use this overlay — it has its own compact sheet (§6.10) and defers AI processing to the backend.
+The in-app **manual add** flow (`+` → enter URL). On `POST /items`, the popup expands to show the **non-AI** fields the create returned, and lets the user optionally tag before committing. It does **not** wait for AI — tags/summary stream in afterwards. The share extension does not use this popup (§6.10); file adds skip it entirely (§8.8).
+
+**Flow:** enter URL → `POST /items` → popup expands with returned details → user optionally adds tags/project → **Save** → `PUT /items/:id` writes the user fields → item appears in the feed (still `processing` for AI).
 
 **Fields:**
 
 | Field | Behaviour |
 |---|---|
-| Name | Editable, AI pre-filled |
-| Tags | Editable, 10 AI pre-filled; user can add more |
-| Project | Editable, autocomplete from existing projects, optional |
+| Name | Editable, pre-filled with the returned `title` |
+| Source | Shown (platform icon), immutable |
+| Consume time | Shown when returned, immutable |
+| Tags | Optional, user-entered; AI tags merge in later |
+| Project | Optional, autocomplete from existing projects |
 | Link | Immutable |
-| Summary | AI-generated, immutable |
 | Reminder | Push notification toggle |
+
+Summary is AI-generated and not shown here — it fills in on the item later.
 
 **Actions:** Save button + swipe down to dismiss
 
@@ -298,6 +304,8 @@ The iOS share extension is how items enter Shelf from other apps (Safari, TikTok
 
 **Not-signed-in edge case:** If the App Group has no JWT (user shared a link before ever signing in), the sheet shows "Open Shelf to sign in first" instead of the save UI.
 
+**Shared files (v2, deferred):** a shared image/PDF runs the file path — validate size/type → `POST /items` with a file body → upload to the returned `upload_url` (§8.8), same as the in-app file add minus the picker.
+
 **Fields:**
 
 | Field | Behaviour |
@@ -350,11 +358,12 @@ flowchart LR
 ```mermaid
 flowchart LR
   A[Home] --> B[Tap +]
-  B --> C[Paste link + Save]
-  C --> D[Loading spinner\nAI processing]
-  D --> E[Post-processing overlay]
-  E --> F[Save]
-  F --> G[Item saved]
+  B --> C[Enter URL]
+  C --> D[POST /items\nnon-AI fields]
+  D --> E[Popup expands\noptional tags/project]
+  E --> F[Save → PUT /items/:id]
+  F --> G[Item in feed\nprocessing]
+  G -.async.-> H[AI tags + summary\nfill in via Realtime]
 ```
 
 ---
@@ -386,10 +395,11 @@ flowchart LR
 | `type` | No | `link` in v1; `image` / `pdf` reserved (deferred) |
 | `url` | No | The shared URL (link-kind items) — original, as received |
 | `normalized_url` | No | Canonicalised `url` used as the dedup key; `unique (user_id, normalized_url)` |
-| `status` | Derived | Processing lifecycle (§8.2). `pending` / `processing` / `ready` / `partial` / `failed` |
+| `status` | Derived | Processing lifecycle (§8.2). `awaiting_upload` (file uploads, v2) / `processing` / `ready` / `failed` |
+| `processing_started_at` | Derived | Timestamp the current processing attempt began; reset on retry. Watchdog fails the row if `now() > processing_started_at + deadline` (§8.2) |
 | `raw_content` | No | Immutable base for all embedding generations; populated during processing. Kept user-agnostic for future global dedup (§8.3) |
-| `name` | Yes | AI pre-filled, user editable; title may arrive in the fast create response |
-| `tags` | Yes | 10 AI pre-filled, user can add |
+| `name` | Yes | Pre-filled from the parsed `title` (non-AI, in the create response); user editable |
+| `tags` | Yes | 10 AI-generated (async, by the worker); user can also add their own (in the add-link popup or later) |
 | `summary` | No | AI-generated |
 | `thumbnail_url` | No | From OG/Twitter tags or oEmbed; may arrive in the fast create response |
 | `consume_time` | No | Estimated time to consume, in **seconds** (read / watch / listen). Derived during processing (§8.4). `null` when not applicable or unknown; UI hides the badge when blank |
@@ -405,17 +415,17 @@ Every item auto-gets the `#all` tag. Tag filtering, top-5 tag computation, and p
 Items are created optimistically and enriched asynchronously. The user never waits for AI.
 
 **Create (fast path, < 2s):**
-- `POST /items` with the URL creates the row immediately at `status: 'processing'` and returns it straight away.
-- The response carries whatever cheap enrichment is available within a hard timeout (~1.5s): for links, the title and thumbnail from Open Graph / Twitter-card tags (or oEmbed for YouTube). If the origin is slow, the create returns **without** thumbnail/title rather than blocking — those fill in via enrichment.
-- The app shows the item in the feed right away, even before tagging/summary/embedding exist.
+- `POST /items` with the URL creates the row at `status: 'processing'` and returns it straight away with the **non-AI** fields it can resolve within a hard timeout: `source`, `title`, `thumbnail_url`, `consume_time` (and `raw_content`). A slow origin returns whatever arrived rather than blocking; the rest fills in via enrichment.
+- **AI fields are always async** — `tags`, `summary`, `embedding` (and the YouTube transcript that feeds them) are produced by the worker, never awaited on create.
+- **Manual add** (in-app `+`): the create response populates a confirm popup (§6.3); the item enters the feed on Save. **Share / file**: the item enters the feed immediately, no popup. Either way, AI fields stream in later via Realtime.
 
 **Status lifecycle (the "complete" mechanism):**
-- `pending` → row created, enrichment not started
+- `awaiting_upload` → file-upload items only (v2): row created and presigned URL issued, file not yet in storage. URL items skip this and start at `processing`.
 - `processing` → enrichment underway (content fetch, AI tag, summary, embedding)
-- `ready` → fully enriched; semantically searchable
-- `partial` → terminal; usable but some enrichment permanently failed (e.g. Instagram scrape blocked, transcript unavailable)
-- `failed` → terminal; URL could not be resolved at all
-- "Complete" = any **terminal** state (`ready` / `partial` / `failed`). The client stops watching an item once terminal.
+- `ready` → terminal; fully enriched, semantically searchable
+- `failed` → terminal; could not produce a usable item (URL unreachable, or a file upload that never completed / is corrupt)
+- "Complete" = any **terminal** state (`ready` / `failed`). The client stops watching an item once terminal.
+- **No `partial` state.** Enrichment degrades gracefully and still lands at `ready`: a missing YouTube transcript falls back to the description; if AI tagging fails after retries the item keeps `#all` + whatever was parsed and the user can add tags manually. `failed` is reserved for "nothing usable was produced."
 
 **Live updates — Supabase Realtime (primary):**
 - The app subscribes to Postgres changes on `items where user_id = me and status not in (terminal)`.
@@ -426,9 +436,28 @@ Items are created optimistically and enriched asynchronously. The user never wai
 - Exponential backoff with a hard ceiling (~8–10s); after a total window, mark client-side as "taking longer than usual" rather than retrying forever.
 
 **Fetch / reconcile triggers:**
-- Full `GET /items` + `GET /projects` (parallel) on **session acquired** and on **foreground after background**. This is the safety net that catches everything completed while the app was closed, independent of Realtime/polling.
+- Full `GET /items` + `GET /projects` (parallel) on **session acquired**, on **foreground after background**, and on **network reconnect**. This is the safety net that catches everything completed while the app was closed/offline, independent of Realtime/polling.
 - No background polling — when the app isn't foregrounded it does nothing; the next foreground GET reconciles.
 - Data fetching must be **gated on session** and re-run on logout→login (the store currently mounts outside the auth gate — see §10).
+
+**Failure, watchdog & retry — the backend owns failure, never the client:**
+
+The client only ever *reflects* a backend status; it never decides "failed" on a timer (that would split-brain against a backend that succeeds late). So:
+
+- **Watchdog.** A backend sweep (cron / queue visibility-timeout / stale-heartbeat) marks any item stuck in `processing` past a deadline as `failed`. This bounds the skeleton — an item cannot sit in `processing` forever. The deadline must sit **above P99 processing time** (order of 60–120s for an LLM-tag + embed + parse pipeline, not seconds); it is a safety net for crashed/hung workers, not a tight SLA. A too-short deadline marks healthy jobs failed.
+- **No attempt token.** Given the worker is the only writer of `status`, does a **single guarded terminal write**, and is idempotent on anything outside the item row, a fencing token is unnecessary. The guards are:
+  - Worker terminal write: `UPDATE … SET status='ready'/'failed' … WHERE id = ? AND status = 'processing'`
+  - Watchdog: `UPDATE … SET status='failed' WHERE id = ? AND status = 'processing' AND now() > processing_started_at + deadline`
+  - Retry (reprocess): `UPDATE … SET status='processing', processing_started_at = now() WHERE id = ? AND status = 'failed'`
+  - A late "zombie" worker from a timed-out attempt finds the row no longer `processing` and no-ops. A retry re-enters `processing` and **resets `processing_started_at`** (else the watchdog instantly re-fails it). Accepted trade-off: with no token, a slow-but-healthy zombie's (valid) result can win over a retry's — fine for idempotent same-input reprocessing.
+  - The worker writes **AI-owned fields only** (`summary`, `embedding`, and **unions** AI tags with any user tags); it never clobbers user-set `name`/tags. This keeps the manual-add Save (a `PUT` during `processing`) and the worker's write from racing destructively.
+- **`DELETE` is blocked while `processing`** for every item — removes the delete-vs-late-success race; an item can only be deleted once terminal. **File items are additionally non-interactive** (skeleton, not clickable/openable) until terminal. The manual-add Save `PUT` is the creation completing and is allowed.
+- **Retry is a dedicated endpoint** (`POST /items/:id/reprocess`, §8.7), not the create endpoint — create mints a new id and would duplicate. Capped (default 2, tunable); after the cap the failed item offers an explicit **Remove** (user-initiated; nothing auto-deletes).
+
+**Client states on a card / detail:**
+- `processing`: skeleton fill-in for the not-yet-arrived fields; a soft "taking a while…" hint after ~30–45s (cosmetic only — never a failure verdict or destructive action).
+- `ready`: normal item.
+- `failed`: a failure affordance with **Try again** (calls reprocess) up to the cap, then **Remove**.
 
 ### 8.3 Deduplication
 
@@ -463,8 +492,7 @@ Items are created optimistically and enriched asynchronously. The user never wai
 
 **AI tagging:**
 - LLM API call per saved item. 10 tags returned. Dirt cheap — fractions of a cent per item.
-- **Manual add:** synchronous from the user's perspective — `+` → loading spinner → AI tags → post-processing overlay pre-filled.
-- **Share extension:** fully async on the backend — the extension enqueues the item and dismisses; tagging happens server-side and the finished item appears via Realtime or next app open.
+- **Always async** across every entry point (manual add, share, file). The worker generates tags/summary/embedding after create; they stream into the item via Realtime. Manual add lets the user add their own tags in the popup (§6.3); the AI tags merge in when ready.
 
 **Share extension architecture:**
 - The extension is a separate process and cannot access the main app's Supabase session directly.
@@ -489,10 +517,14 @@ Items are created optimistically and enriched asynchronously. The user never wai
 | GET | `/items` | Load all items (full rows) |
 | GET | `/items?status=processing` | Batched poll of non-terminal items (polling fallback only) |
 | GET | `/projects` | Load all projects on open (catches empty projects) |
-| POST | `/items` | Create (no id) — returns the row immediately at `status: processing` with any fast enrichment; or update (id present). Idempotent on `normalized_url` collision (§8.3) |
+| POST | `/items` | **Create** — body branches on kind. **Link:** `{ url, project_id? }` → fast non-AI enrichment (`source`, `title`, `thumbnail_url`, `consume_time`), row at `processing`, returns the entity; idempotent on `normalized_url` collision (§8.3). **File (v2):** `{ type, filetype, size, project_id? }` (app pre-validates) → row at `awaiting_upload`, returns `{ id, upload_url }` (presigned PUT, 3-min TTL, type/size-constrained, id in object key). See §8.8 |
+| PUT | `/items/:id` | **Update** an item — the manual-add Save (user tags / project / name) and later edits (name, tags, project, reminder). Re-embeds on name/tag change (§8.6) |
+| POST | `/items/:id/reprocess` | **Retry** a `failed` item (§8.2). Guarded `failed → processing`, resets `processing_started_at`, re-enqueues the worker. Artifact present (file in storage / link URL) → just re-enqueue; a file upload that never landed → returns a fresh `{ upload_url }` and sets `awaiting_upload` so the app re-uploads |
 | POST | `/projects` | Upsert project — create (no id) or update (id present) |
-| DELETE | `/items/:id` | Delete an item |
+| DELETE | `/items/:id` | Delete an item (rejected while `processing` — items are untouchable until terminal, §8.2) |
 | DELETE | `/projects/:id` | Delete a project |
+
+Synchronous failures of `POST /items` (create) and of the direct upload PUT are surfaced to the user as a **"try again"** error before any item is committed to the feed.
 
 **Frontend data strategy:**
 - Both GET endpoints fire in parallel on session-acquired and on foreground (§8.2)
@@ -500,6 +532,35 @@ Items are created optimistically and enriched asynchronously. The user never wai
 - Tag filtering, top-5 tag computation, and project membership all derived client-side
 - Live fill-in of in-flight items via Supabase Realtime (polling as fallback)
 - No pagination in v1; add cursor-based pagination if per-user item count grows past ~500
+
+### 8.8 Item ingestion — end-to-end flow
+
+Both kinds of item — URL (v1) and file (v2, deferred) — share one processing pipeline and the §8.2 lifecycle (optimistic create → `processing` → worker → terminal, with Realtime fill-in, watchdog, and reprocess). They differ only in how the content reaches the backend.
+
+**Worker trigger is decoupled from any single source.** A storage upload event does **not** run the worker directly — it (like the create endpoint and the reprocess endpoint) **enqueues a "process item X" job**. The worker is trigger-agnostic and reads whatever artifact the row points at (the storage object for files, the URL for links). This is what lets retry re-run processing without a re-upload.
+
+**URL item — in-app manual add (v1):**
+1. App `POST /items { url, project_id? }`. Backend dedups (§8.3), does fast non-AI enrichment (`source`, `title`, `thumbnail_url`, `consume_time`), creates the row at `processing`, enqueues the job, returns the entity. Create error → "try again" (nothing enters the feed).
+2. The add-link popup (§6.3) expands with those fields; user optionally adds tags/project → **Save** → `PUT /items/:id` writes the user fields. The item now enters the feed (AI fields in skeleton).
+3. Worker: parse content → AI tags/summary → embed → guarded terminal write to `ready` (or `failed`).
+4. Realtime pushes the finished row; the app fills it in (or shows the failure affordance). Foreground/reconnect GET is the safety net.
+
+**URL item — share extension (v1):** same backend path, but the extension `POST /items` after the optional-project step and dismisses — no popup, no `PUT`; the item enters the feed and fills in via Realtime / next fetch (§6.10).
+
+**File item (v2, deferred):** files go to **Supabase Storage** (S3-backed, S3-compatible). Same for the in-app picker and a share-sheet file (the share just skips the picker).
+1. App pre-validates size + type, then `POST /items { type, filetype, size, project_id? }`. Backend creates the row at `awaiting_upload` and returns `{ id, upload_url }` — presigned PUT, 3-min TTL, type/size-constrained, id encoded in the **object key** (`uploads/{user_id}/{item_id}.{ext}`) so the storage event carries id + owner (no metadata reliance).
+2. App shows the item in the feed **immediately under a skeleton overlay**, every attribute in skeleton state. **Not clickable / won't open until `ready`.** Images: local file URI behind the skeleton (optimistic thumbnail); PDFs: document placeholder until the worker renders a first-page preview.
+3. App uploads directly to `upload_url`. Upload error → "try again".
+4. The **Supabase Storage event** (insert on `storage.objects`) enqueues the job with the id from the key.
+5. Worker processes as above → `ready` / `failed`; Realtime fills in or shows failure.
+
+**Retry (both kinds) — `POST /items/:id/reprocess`** (§8.2, §8.7):
+- Artifact present (file in storage / link URL): guarded `failed → processing`, reset `processing_started_at`, re-enqueue. No re-upload.
+- File upload never landed: endpoint returns a fresh `{ upload_url }` and sets `awaiting_upload`; the app re-uploads (→ storage event → enqueue).
+
+**Orphan handling:** presigned URL expires at 3 min; items left in `awaiting_upload` past that window are swept to `failed` so the feed never shows a permanent skeleton.
+
+**Worker compute:** TBD — Supabase Storage and the Realtime push are fixed, but the heavy AI worker may run off-platform (container / serverless), triggered by the enqueued job and writing back via the Supabase client. Storage choice does not force compute choice.
 
 ---
 
@@ -524,7 +585,8 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | AI auto-tagging: 10 tags/item, user can add | Cheap, high-value differentiator | §8.5 |
 | Projects optional; items first-class | Don't force organisation | §5, §6 |
 | Every item auto-gets `#all` | Guarantees a default feed | §8.1 |
-| Images/PDFs deferred → Supabase Storage when built | One platform, integrates with RLS/auth; avoids raw S3 ops surface | §5 |
+| Images/PDFs deferred → Supabase Storage when built | One platform, integrates with RLS/auth; S3-backed so the same presigned-upload flow applies; the event→worker trigger and completion push are native (vs DIY on raw S3) | §5, §8.8 |
+| File upload flow: presigned PUT (3-min TTL, id in object key, type/size constrained) → storage event → worker → Realtime push; optimistic non-clickable skeleton; orphan sweep | Reuses the URL item lifecycle; instant feedback without waiting on AI; bounded abandoned-upload cleanup | §8.8 |
 | Global dedup deferred to v2 | v1 dedups per-user only | §5, §8.3 |
 
 ### Navigation & screens
@@ -536,7 +598,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Calendar date filter on every tab except Projects | Day grid; clears on toggle | §6.2 |
 | Header: `☰` (sidebar) \| `Shelf` \| `🔍` + `📅` | — | §6.2 |
 | Project detail header: `←` \| name \| `✏️` + `📅`; tag taps go to global tag view | Project-scoped search dropped — search is global | §6.9 |
-| Post-processing overlay (manual add only): name/tags/project/link/summary/reminder; save + swipe-to-dismiss | Share extension uses its own compact sheet instead | §6.3 |
+| Add-link popup (manual add only): shows returned non-AI fields (source/title/consume-time), optional tags/project, Save → `PUT /items/:id`; no AI wait, AI fields stream in after | Share extension uses its own compact sheet; files skip the popup. Replaces the old "wait for AI then review pre-filled tags" overlay | §6.3 |
 | Item detail: parallax thumbnail (tap→URL), name/source/summary/tags/reminder, persistent Open + Delete | — | §6.4 |
 | Search: tag-pill browser empty state + debounced semantic results; doubles as browser for non-top-5 tags | — | §6.5 |
 | Create/edit project: bottom sheet, 20-char limit, title-cased | — | §6.6, §6.9 |
@@ -544,10 +606,18 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 ### Technical
 | Decision | Rationale | Ref |
 |---|---|---|
-| Optimistic create: `POST /items` returns immediately at `processing` with fast OG/oEmbed enrichment (~1.5s timeout) | User never waits on AI; item shows instantly | §8.2 |
-| `status` enum is the "complete" mechanism (`pending→processing→ready`, terminal `partial`/`failed`) | Distinguishes "working" from "gave up"; boolean can't | §8.2 |
+| Optimistic create: `POST /items` returns immediately at `processing` with non-AI fields (source/title/thumbnail/consume-time); AI always async | User never waits on AI; item shows instantly | §8.2 |
+| Endpoints: `POST /items` create (one endpoint, body branches link vs file — file returns id + presigned URL), `PUT /items/:id` update, `POST /items/:id/reprocess` retry | One create endpoint for both kinds; create/update separated; POST (not GET) since create writes a row | §8.7 |
+| `status` enum: `awaiting_upload` (file uploads) → `processing` → terminal `ready`/`failed`; no `partial` | Enrichment degrades gracefully to `ready`; `failed` = nothing usable produced. Simpler than carrying a partial state nothing branches on | §8.2 |
 | Supabase Realtime primary for live fill-in; batched polling (capped backoff) fallback | No wasted polling; instant UI update | §8.2 |
-| Fetch on session-acquired + foreground; no background polling; gate on session, re-fetch on login | Resource-cheap; safety-net reconcile | §8.2 |
+| Backend owns failure via a watchdog (deadline > P99); client never declares failure on a timer | Avoids client/backend split-brain (success-after-client-gave-up); bounds the skeleton | §8.2 |
+| No attempt/fencing token; guard terminal writes on `WHERE status='processing'`, reset `processing_started_at` on retry | Items untouchable while processing + single guarded terminal write + idempotent side-effects make a token unnecessary; accepts a slow zombie's valid result winning | §8.2 |
+| `DELETE` blocked while `processing` (file items also non-interactive); worker writes AI-owned fields only and unions tags, never clobbers user edits | Removes the delete-vs-late-success race; lets the manual-add Save `PUT` coexist with the worker | §8.2 |
+| Retry via dedicated `POST /items/:id/reprocess` (not create); capped (default 2) then Remove; nothing auto-deletes | Create mints a new id (would duplicate); no destructive auto-action | §8.2, §8.7 |
+| Worker trigger decoupled from source: storage event / create / reprocess all enqueue one "process item X" job | Lets retry re-run without re-upload; worker is trigger-agnostic | §8.8 |
+| File upload (v2): Supabase Storage presigned PUT (3-min TTL, id in object key, type/size constrained); reprocess re-issues a URL only if the upload never landed | One platform, S3-backed; idempotent retry handling both failure stages | §8.8 |
+| Optimistic, non-clickable skeleton until terminal; soft "taking a while" hint at ~30–45s; create/upload errors → "try again" | Instant feedback; comfort without a false failure verdict | §8.2, §8.8 |
+| Fetch on session-acquired + foreground + network reconnect; no background polling; gate on session, re-fetch on login | Resource-cheap; safety-net reconcile across every resume path | §8.2 |
 | Per-user dedup: `unique (user_id, normalized_url)`, idempotent POST, conservative normalisation | Idempotency keeps both callers simple; conservative norm avoids merging distinct content | §8.3 |
 | Re-add files into a chosen project only if item has none | Never silently move an already-filed item | §8.3 |
 | Embeddings: `text-embedding-3-small` → pgvector, HNSW; re-embed synchronously (~300ms) on name/tag edit | Sub-50ms search; cheap re-embed | §8.6 |
