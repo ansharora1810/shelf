@@ -12,7 +12,14 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.shelf.app"
+      "bundleIdentifier": "com.shelf.app",
+      "infoPlist": {
+        "AppGroup": "group.com.shelf.app",
+        "AppGroupIdentifier": "group.com.shelf.app"
+      },
+      "entitlements": {
+        "com.apple.security.application-groups": ["group.com.shelf.app"]
+      }
     },
     "web": {
       "bundler": "metro",
@@ -23,7 +30,14 @@
       "expo-font",
       "expo-image",
       "expo-sqlite",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-share-extension",
+        {
+          "activationRules": [{ "type": "url", "max": 1 }],
+          "height": 380
+        }
+      ]
     ]
   }
 }

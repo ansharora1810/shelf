@@ -1,5 +1,5 @@
-import AsyncStorage from 'expo-sqlite/kv-store'
 import { createClient } from '@supabase/supabase-js'
+import { sharedAuthStorage } from './storage'
 import { CryptoDigestAlgorithm, digest } from 'expo-crypto'
 import { AppState } from 'react-native'
 
@@ -21,7 +21,7 @@ export const supabase = createClient(
   process.env.EXPO_PUBLIC_SUPABASE_KEY!,
   {
     auth: {
-      storage: AsyncStorage,
+      storage: sharedAuthStorage,
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: false,
