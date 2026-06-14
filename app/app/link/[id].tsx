@@ -11,7 +11,6 @@ import {
 } from 'react-native'
 import * as Linking from 'expo-linking'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
-import { Image } from 'expo-image'
 import { useLocalSearchParams, useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
 import Animated, {
@@ -22,6 +21,8 @@ import Animated, {
   Extrapolation,
 } from 'react-native-reanimated'
 import { useShelf } from '../../src/store/shelf'
+import { Thumbnail } from '../../src/components/Thumbnail'
+import { titleAccent, formatConsumeTime } from '../../src/data/title'
 import { Colors, FontFamily, Spacing, Radius } from '../../src/constants/tokens'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
@@ -40,11 +41,16 @@ export default function LinkDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
   const router = useRouter()
   const insets = useSafeAreaInsets()
-  const { getLinkById, deleteLink } = useShelf()
+  const { getLinkById, deleteLink, updateItem } = useShelf()
   const link = getLinkById(id)
 
   const scrollY = useSharedValue(0)
   const [reminder, setReminder] = useState(link?.reminderEnabled ?? false)
+
+  const toggleReminder = (value: boolean) => {
+    setReminder(value)
+    if (link) updateItem(link.id, { reminderEnabled: value }).catch(() => setReminder(!value))
+  }
 
   const scrollHandler = useAnimatedScrollHandler(event => {
     scrollY.value = event.contentOffset.y
@@ -79,6 +85,8 @@ export default function LinkDetailScreen() {
     }
   })()
 
+  const { accent, rest } = titleAccent(link.name)
+
   const openOriginal = () => Linking.openURL(link.url)
 
   const confirmDelete = () => {
@@ -89,7 +97,10 @@ export default function LinkDetailScreen() {
         style: 'destructive',
         onPress: () => {
           deleteLink(link.id)
-          router.back()
+            .then(() => router.back())
+            .catch(() =>
+              Alert.alert('Still processing', 'This link is being processed — try again in a moment.'),
+            )
         },
       },
     ])
@@ -99,11 +110,14 @@ export default function LinkDetailScreen() {
     <View style={styles.screen}>
       {/* Parallax thumbnail — pinned behind the content, which scrolls up over it */}
       <Animated.View style={[styles.thumbnailWrap, thumbnailStyle as object]}>
-        <Image
-          source={{ uri: link.thumbnail }}
-          style={styles.thumbnail}
-          contentFit="cover"
-          transition={200}
+        <Thumbnail
+          uri={link.thumbnail}
+          source={link.source}
+          name={link.name}
+          width={SCREEN_WIDTH}
+          height={THUMBNAIL_HEIGHT}
+          radius={0}
+          iconSize={88}
         />
       </Animated.View>
 
@@ -117,8 +131,8 @@ export default function LinkDetailScreen() {
         <View style={styles.body}>
           {/* Title */}
           <Text style={styles.title}>
-            <Text style={styles.titleDescriptor}>{link.descriptor} </Text>
-            <Text style={styles.titleMain}>{link.title}</Text>
+            {accent ? <Text style={styles.titleDescriptor}>{accent} </Text> : null}
+            <Text style={styles.titleMain}>{rest}</Text>
           </Text>
 
           {/* Source + consume time */}
@@ -130,7 +144,7 @@ export default function LinkDetailScreen() {
             {link.consumeTime ? (
               <View style={styles.consumeRow}>
                 <Ionicons name="time-outline" size={14} color={Colors.accent} />
-                <Text style={styles.consumeText}>{link.consumeTime}</Text>
+                <Text style={styles.consumeText}>{formatConsumeTime(link.consumeTime)}</Text>
               </View>
             ) : null}
           </View>
@@ -155,7 +169,7 @@ export default function LinkDetailScreen() {
             </View>
             <Switch
               value={reminder}
-              onValueChange={setReminder}
+              onValueChange={toggleReminder}
               trackColor={{ false: '#D9D3C8', true: Colors.primary }}
               thumbColor={Colors.surface}
             />

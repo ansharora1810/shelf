@@ -10,13 +10,11 @@ export function allTags(links: Link[]): string[] {
     .map(([tag]) => tag)
 }
 
-// Client-side stand-in for the backend's semantic search. Swap for the
-// embeddings API later; the (query, links) -> Link[] contract stays the same.
 export function searchLinks(query: string, links: Link[]): Link[] {
   const q = query.trim().toLowerCase().replace(/^#/, '')
   if (!q) return []
   return links.filter(link => {
-    const haystack = [link.title, link.descriptor, link.summary, ...link.tags].join(' ').toLowerCase()
+    const haystack = [link.name, link.summary, ...link.tags].join(' ').toLowerCase()
     return haystack.includes(q)
   })
 }

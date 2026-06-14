@@ -7,6 +7,7 @@ import { Ionicons } from '@expo/vector-icons'
 import { useShelf } from '../src/store/shelf'
 import { allTags, searchLinks } from '../src/data/search'
 import { Link } from '../src/types'
+import { titleAccent } from '../src/data/title'
 import { Colors, FontFamily, Radius, Spacing } from '../src/constants/tokens'
 
 const SOURCE_ICONS: Record<Link['source'], 'logo-youtube' | 'logo-instagram' | 'globe-outline'> = {
@@ -89,13 +90,14 @@ export default function SearchScreen() {
 }
 
 function ResultRow({ link, onPress }: { link: Link; onPress: () => void }) {
+  const { accent, rest } = titleAccent(link.name)
   return (
     <Pressable style={styles.row} onPress={onPress}>
       <Image source={{ uri: link.thumbnail }} style={styles.thumb} contentFit="cover" transition={150} />
       <View style={styles.rowBody}>
         <Text style={styles.rowTitle} numberOfLines={2}>
-          {link.descriptor ? <Text style={styles.rowDescriptor}>{link.descriptor} </Text> : null}
-          <Text style={styles.rowTitleMain}>{link.title}</Text>
+          {accent ? <Text style={styles.rowDescriptor}>{accent} </Text> : null}
+          <Text style={styles.rowTitleMain}>{rest}</Text>
         </Text>
         <View style={styles.rowMeta}>
           <Ionicons name={SOURCE_ICONS[link.source]} size={13} color={Colors.textSecondary} />

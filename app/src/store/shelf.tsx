@@ -1,50 +1,134 @@
-import { createContext, useCallback, useContext, useMemo, useState, ReactNode } from 'react'
-import { Link, Project } from '../types'
-import { mockLinks, mockProjects } from '../data/mock'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react'
+import { AppState } from 'react-native'
+import { Link, Project, Source } from '../types'
+import { supabase } from '../lib/supabase'
+import { ItemRow, ItemStatus, ProjectRow } from '../lib/database.types'
+import { useAuth } from './auth'
 
-// In-memory store seeded from mock data. Mutators mirror the planned CRUD API
-// surface (PRD §9): `upsert` maps to POST (create when no id, update when id
-// present) and `delete` maps to DELETE. Swapping these bodies for network
-// calls later requires no changes in the screens.
+function mapItem(row: ItemRow): Link {
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    thumbnail: row.thumbnail_url ?? '',
+    url: row.url ?? '',
+    source: (row.source ?? 'website') as Source,
+    status: row.status as ItemStatus,
+    tags: row.tags,
+    summary: row.summary ?? '',
+    reminderEnabled: row.reminder_enabled,
+    projectId: row.project_id,
+    consumeTime: row.consume_time,
+    savedAt: row.created_at,
+  }
+}
 
-export type LinkDraft = Omit<Link, 'id'> & { id?: string }
+function mapProject(row: ProjectRow): Project {
+  return { id: row.id, name: row.name }
+}
+
+export type CreateResult = { item: Link; deduped: boolean }
+
+export type ItemEdit = {
+  name?: string
+  tags?: string[]
+  projectId?: string | null
+  reminderEnabled?: boolean
+}
+
 export type ProjectDraft = { id?: string; name: string }
-
-type RawProject = { id: string; name: string }
 
 interface ShelfContextValue {
   links: Link[]
   projects: Project[]
   getLinkById: (id: string) => Link | undefined
   getLinksForProject: (projectId: string) => Link[]
-  upsertLink: (draft: LinkDraft) => Link
-  deleteLink: (id: string) => void
-  upsertProject: (draft: ProjectDraft) => Project
-  deleteProject: (id: string) => void
+  createItem: (url: string, projectId: string | null) => Promise<CreateResult>
+  updateItem: (id: string, edit: ItemEdit) => Promise<void>
+  addItemTags: (id: string, tags: string[]) => Promise<void>
+  deleteLink: (id: string) => Promise<void>
+  upsertProject: (draft: ProjectDraft) => Promise<Project>
+  deleteProject: (id: string, deleteItems: boolean) => Promise<void>
 }
 
 const ShelfContext = createContext<ShelfContextValue | null>(null)
 
-let idSequence = 0
-function newId(prefix: string): string {
-  idSequence += 1
-  return `${prefix}-${Date.now()}-${idSequence}`
+function upsertById<T extends { id: string }>(list: T[], row: T): T[] {
+  const index = list.findIndex(x => x.id === row.id)
+  if (index === -1) return [row, ...list]
+  const next = [...list]
+  next[index] = row
+  return next
 }
 
 export function ShelfProvider({ children }: { children: ReactNode }) {
-  const [links, setLinks] = useState<Link[]>(mockLinks)
-  const [rawProjects, setRawProjects] = useState<RawProject[]>(
-    mockProjects.map(({ id, name }) => ({ id, name })),
-  )
+  const { session } = useAuth()
+  const userId = session?.user.id ?? null
 
-  const projects = useMemo<Project[]>(
-    () =>
-      rawProjects.map(p => ({
-        ...p,
-        linkCount: links.reduce((count, link) => (link.projectId === p.id ? count + 1 : count), 0),
-      })),
-    [rawProjects, links],
-  )
+  const [links, setLinks] = useState<Link[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+
+  const reconcile = useCallback(async () => {
+    if (!userId) return
+    const [items, projs] = await Promise.all([
+      supabase.from('items').select('*'),
+      supabase.from('projects').select('*'),
+    ])
+    if (!items.error && items.data) setLinks(items.data.map(mapItem))
+    if (!projs.error && projs.data) setProjects(projs.data.map(mapProject))
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId) {
+      setLinks([])
+      setProjects([])
+      return
+    }
+    void reconcile()
+  }, [userId, reconcile])
+
+  useEffect(() => {
+    if (!userId) return
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active') void reconcile()
+    })
+    return () => sub.remove()
+  }, [userId, reconcile])
+
+  useEffect(() => {
+    if (!userId) return
+    const channel = supabase
+      .channel(`shelf:${userId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'items' },
+        payload => {
+          if (payload.eventType === 'DELETE') {
+            const id = (payload.old as { id?: string }).id
+            if (id) setLinks(prev => prev.filter(l => l.id !== id))
+            return
+          }
+          setLinks(prev => upsertById(prev, mapItem(payload.new as ItemRow)))
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'projects' },
+        payload => {
+          if (payload.eventType === 'DELETE') {
+            const id = (payload.old as { id?: string }).id
+            if (id) setProjects(prev => prev.filter(p => p.id !== id))
+            return
+          }
+          setProjects(prev => upsertById(prev, mapProject(payload.new as ProjectRow)))
+        },
+      )
+      .subscribe(status => {
+        if (status === 'SUBSCRIBED') void reconcile()
+      })
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [userId, reconcile])
 
   const getLinkById = useCallback((id: string) => links.find(l => l.id === id), [links])
 
@@ -53,37 +137,77 @@ export function ShelfProvider({ children }: { children: ReactNode }) {
     [links],
   )
 
-  const upsertLink = useCallback((draft: LinkDraft): Link => {
-    const link: Link = draft.id ? (draft as Link) : { ...draft, id: newId('link') }
-    setLinks(prev => {
-      const index = prev.findIndex(l => l.id === link.id)
-      if (index === -1) return [link, ...prev]
-      const next = [...prev]
-      next[index] = link
-      return next
+  const createItem = useCallback(async (url: string, projectId: string | null): Promise<CreateResult> => {
+    const { data, error } = await supabase.functions.invoke('create-item', {
+      body: { url, project_id: projectId },
     })
-    return link
+    if (error || !data?.item) throw error ?? new Error('Create failed')
+    const item = mapItem(data.item as ItemRow)
+    setLinks(prev => upsertById(prev, item))
+    return { item, deduped: Boolean(data.deduped) }
   }, [])
 
-  const deleteLink = useCallback((id: string) => {
+  const updateItem = useCallback(async (id: string, edit: ItemEdit): Promise<void> => {
+    const patch: Partial<ItemRow> = {}
+    if (edit.name !== undefined) patch.name = edit.name
+    if (edit.tags !== undefined) patch.tags = edit.tags
+    if (edit.projectId !== undefined) patch.project_id = edit.projectId
+    if (edit.reminderEnabled !== undefined) patch.reminder_enabled = edit.reminderEnabled
+    const { data, error } = await supabase.from('items').update(patch).eq('id', id).select().single()
+    if (error) throw error
+    if (data) setLinks(prev => upsertById(prev, mapItem(data)))
+  }, [])
+
+  // Additive merge (atomic, server-side) so the manual-add Save preserves any
+  // AI tags the worker may write concurrently. Never replaces the array.
+  const addItemTags = useCallback(async (id: string, tags: string[]): Promise<void> => {
+    if (tags.length === 0) return
+    const { error } = await supabase.rpc('add_item_tags', { p_id: id, p_tags: tags })
+    if (error) throw error
+    setLinks(prev =>
+      prev.map(l => (l.id === id ? { ...l, tags: Array.from(new Set([...l.tags, ...tags])) } : l)),
+    )
+  }, [])
+
+  const deleteLink = useCallback(async (id: string): Promise<void> => {
+    const { error } = await supabase.from('items').delete().eq('id', id)
+    if (error) throw error
     setLinks(prev => prev.filter(l => l.id !== id))
   }, [])
 
-  const upsertProject = useCallback((draft: ProjectDraft): Project => {
-    const id = draft.id ?? newId('project')
-    setRawProjects(prev => {
-      const index = prev.findIndex(p => p.id === id)
-      if (index === -1) return [...prev, { id, name: draft.name }]
-      const next = [...prev]
-      next[index] = { id, name: draft.name }
-      return next
-    })
-    return { id, name: draft.name, linkCount: 0 }
+  const upsertProject = useCallback(async (draft: ProjectDraft): Promise<Project> => {
+    if (draft.id) {
+      const { data, error } = await supabase
+        .from('projects')
+        .update({ name: draft.name })
+        .eq('id', draft.id)
+        .select()
+        .single()
+      if (error) throw error
+      const project = mapProject(data)
+      setProjects(prev => upsertById(prev, project))
+      return project
+    }
+    const { data, error } = await supabase.from('projects').insert({ name: draft.name }).select().single()
+    if (error) throw error
+    const project = mapProject(data)
+    setProjects(prev => upsertById(prev, project))
+    return project
   }, [])
 
-  const deleteProject = useCallback((id: string) => {
-    setRawProjects(prev => prev.filter(p => p.id !== id))
-    setLinks(prev => prev.map(l => (l.projectId === id ? { ...l, projectId: null } : l)))
+  const deleteProject = useCallback(async (id: string, deleteItems: boolean): Promise<void> => {
+    if (deleteItems) {
+      const { error } = await supabase.from('items').delete().eq('project_id', id)
+      if (error) throw error
+      setLinks(prev => prev.filter(l => l.projectId !== id))
+    } else {
+      const { error } = await supabase.from('items').update({ project_id: null }).eq('project_id', id)
+      if (error) throw error
+      setLinks(prev => prev.map(l => (l.projectId === id ? { ...l, projectId: null } : l)))
+    }
+    const { error } = await supabase.from('projects').delete().eq('id', id)
+    if (error) throw error
+    setProjects(prev => prev.filter(p => p.id !== id))
   }, [])
 
   const value = useMemo(
@@ -92,12 +216,14 @@ export function ShelfProvider({ children }: { children: ReactNode }) {
       projects,
       getLinkById,
       getLinksForProject,
-      upsertLink,
+      createItem,
+      updateItem,
+      addItemTags,
       deleteLink,
       upsertProject,
       deleteProject,
     }),
-    [links, projects, getLinkById, getLinksForProject, upsertLink, deleteLink, upsertProject, deleteProject],
+    [links, projects, getLinkById, getLinksForProject, createItem, updateItem, addItemTags, deleteLink, upsertProject, deleteProject],
   )
 
   return <ShelfContext.Provider value={value}>{children}</ShelfContext.Provider>

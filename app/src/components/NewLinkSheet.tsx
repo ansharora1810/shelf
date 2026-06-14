@@ -9,7 +9,8 @@ import {
 } from '@gorhom/bottom-sheet'
 import { Ionicons } from '@expo/vector-icons'
 import { useShelf } from '../store/shelf'
-import { ProcessedLink, fallbackProcessed, isValidLink, normalizeUrl, processLink } from '../data/processLink'
+import { Link } from '../types'
+import { isValidLink, normalizeUrl } from '../data/processLink'
 import { Skeleton } from './Skeleton'
 import { Colors, FontFamily, Radius, Spacing } from '../constants/tokens'
 
@@ -20,8 +21,7 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
     const sheetRef = useRef<BottomSheetModal>(null)
     useImperativeHandle(ref, () => sheetRef.current as BottomSheetModal)
 
-    const { projects, upsertLink } = useShelf()
-    const openedRef = useRef(false)
+    const { projects, createItem, updateItem, addItemTags } = useShelf()
     const requestId = useRef(0)
 
     const [phase, setPhase] = useState<Phase>('input')
@@ -31,7 +31,8 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
     const [tags, setTags] = useState<string[]>([])
     const [projectId, setProjectId] = useState<string | null>(null)
     const [reminder, setReminder] = useState(false)
-    const [processed, setProcessed] = useState<ProcessedLink | null>(null)
+    const [created, setCreated] = useState<Link | null>(null)
+    const [deduped, setDeduped] = useState(false)
     const [failed, setFailed] = useState(false)
 
     const snapPoints = useMemo(() => ['40%', '92%'], [])
@@ -54,9 +55,16 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
       setTags([])
       setProjectId(presetProjectId)
       setReminder(false)
-      setProcessed(null)
+      setCreated(null)
+      setDeduped(false)
       setFailed(false)
     }
+
+    // Track the active project while the form is untouched (input phase), so
+    // opening from a different project picks the right default without a flash.
+    useEffect(() => {
+      if (phase === 'input') setProjectId(presetProjectId)
+    }, [presetProjectId, phase])
 
     const startProcessing = () => {
       if (phase !== 'input' || !isValidLink(url)) return
@@ -66,34 +74,25 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
       setFailed(false)
       Keyboard.dismiss()
       sheetRef.current?.snapToIndex(1)
-      processLink(target)
-        .then(result => {
+      createItem(target, projectId)
+        .then(({ item, deduped }) => {
           if (reqId !== requestId.current) return
-          setProcessed(result)
-          setName(result.name)
-          setTags(prev => {
-            const merged = [...result.tags]
-            for (const tag of prev) if (!merged.includes(tag)) merged.push(tag)
-            return merged
-          })
+          setCreated(item)
+          setDeduped(deduped)
+          setName(item.name)
+          setTags(item.tags)
+          setProjectId(item.projectId)
+          setReminder(item.reminderEnabled)
           setPhase('ready')
         })
         .catch(() => {
           if (reqId !== requestId.current) return
-          // Backend unavailable or errored: drop to empty, editable fields so
-          // the user can fill in name/tags and still save.
-          setProcessed(fallbackProcessed(target))
+          // Create failed: nothing entered the feed. Return to input so the
+          // user can try again.
           setFailed(true)
-          setPhase('ready')
+          setPhase('input')
         })
     }
-
-    // Auto-advance once a valid link is entered (debounced so we don't fire mid-typing).
-    useEffect(() => {
-      if (phase !== 'input' || !isValidLink(url)) return
-      const timer = setTimeout(startProcessing, 500)
-      return () => clearTimeout(timer)
-    }, [url, phase])
 
     const addTag = () => {
       const cleaned = tagDraft.trim().replace(/^#+/, '')
@@ -105,23 +104,20 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
 
     const removeTag = (tag: string) => setTags(prev => prev.filter(t => t !== tag))
 
-    const canSave = phase === 'ready' && name.trim().length > 0 && processed !== null
+    const canFetch = phase === 'input' && isValidLink(url)
+    const canSave = phase === 'ready' && created !== null
 
     const save = () => {
-      if (!canSave || !processed) return
-      upsertLink({
-        descriptor: '',
-        title: name.trim(),
-        thumbnail: processed.thumbnail,
-        url: normalizeUrl(url),
-        source: processed.source,
-        tags,
-        summary: processed.summary,
-        reminderEnabled: reminder,
+      if (!canSave || !created) return
+      void updateItem(created.id, {
+        // Omit name when blank so the worker's AI name lands; writing '' would
+        // block it (worker keeps any non-null name).
+        ...(name.trim() ? { name: name.trim() } : {}),
         projectId,
-        consumeTime: processed.consumeTime,
-        savedAt: new Date().toISOString(),
+        reminderEnabled: reminder,
       })
+      // Tags merge additively (atomic) so the worker's AI tags aren't clobbered.
+      void addItemTags(created.id, tags)
       Keyboard.dismiss()
       sheetRef.current?.dismiss()
     }
@@ -144,15 +140,7 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
         backdropComponent={renderBackdrop}
         handleIndicatorStyle={styles.handle}
         backgroundStyle={styles.sheetBg}
-        onChange={index => {
-          if (index >= 0 && !openedRef.current) {
-            openedRef.current = true
-            initForm()
-          }
-        }}
-        onDismiss={() => {
-          openedRef.current = false
-        }}
+        onDismiss={initForm}
       >
         <BottomSheetScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <Text style={styles.title}>New link</Text>
@@ -169,19 +157,30 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
             editable={phase === 'input'}
             value={url}
             onChangeText={setUrl}
-            onSubmitEditing={startProcessing}
+            onSubmitEditing={() => canFetch && startProcessing()}
             returnKeyType="go"
           />
           {!expanded && (
-            <Text style={styles.hint}>Paste a link — we’ll fetch the name and tags for you.</Text>
+            <>
+              {failed ? (
+                <Text style={styles.errorNote}>Couldn’t add that link — try again.</Text>
+              ) : (
+                <Text style={styles.hint}>Paste a link, then tap Continue.</Text>
+              )}
+              <Pressable
+                style={[styles.button, !canFetch && styles.buttonDisabled]}
+                onPress={startProcessing}
+                disabled={!canFetch}
+              >
+                <Text style={styles.buttonText}>Continue</Text>
+              </Pressable>
+            </>
           )}
 
           {expanded && (
             <>
-              {failed && (
-                <Text style={styles.errorNote}>
-                  Couldn’t fetch details automatically — add them in below.
-                </Text>
+              {deduped && (
+                <Text style={styles.errorNote}>Already in your shelf — editing the saved copy.</Text>
               )}
               <Text style={styles.label}>Name</Text>
               {phase === 'processing' ? (
