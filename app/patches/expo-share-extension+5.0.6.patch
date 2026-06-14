@@ -1,0 +1,39 @@
+diff --git a/node_modules/expo-share-extension/plugin/swift/ShareExtensionViewController.swift b/node_modules/expo-share-extension/plugin/swift/ShareExtensionViewController.swift
+index 7f9f6d8..4bb81e1 100644
+--- a/node_modules/expo-share-extension/plugin/swift/ShareExtensionViewController.swift
++++ b/node_modules/expo-share-extension/plugin/swift/ShareExtensionViewController.swift
+@@ -2,6 +2,7 @@ import UIKit
+ import React
+ import React_RCTAppDelegate
+ import ReactAppDependencyProvider
++internal import Expo
+ import AVFoundation
+ import UniformTypeIdentifiers
+ // if react native firebase is installed, we import and configure it
+@@ -12,7 +13,7 @@ import FirebaseCore
+ import FirebaseAuth
+ #endif
+ 
+-class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
++class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
+   override func sourceURL(for bridge: RCTBridge) -> URL? {
+     self.bundleURL()
+   }
+@@ -43,7 +44,7 @@ class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
+ class ShareExtensionViewController: UIViewController {
+   private let loadingIndicator = UIActivityIndicatorView(style: .large)
+   var reactNativeFactory: RCTReactNativeFactory?
+-  var reactNativeFactoryDelegate: RCTReactNativeFactoryDelegate?
++  var reactNativeFactoryDelegate: ExpoReactNativeFactoryDelegate?
+   private var isCleanedUp = false
+ 
+   deinit {
+@@ -98,7 +99,7 @@ class ShareExtensionViewController: UIViewController {
+       
+       reactNativeFactoryDelegate = ReactNativeDelegate()
+       reactNativeFactoryDelegate!.dependencyProvider = RCTAppDependencyProvider()
+-      reactNativeFactory = RCTReactNativeFactory(delegate: reactNativeFactoryDelegate!)
++      reactNativeFactory = ExpoReactNativeFactory(delegate: reactNativeFactoryDelegate!)
+       
+       var initialProps = sharedData ?? [:]
+       

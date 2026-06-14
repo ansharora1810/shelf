@@ -26,6 +26,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "./plugins/withIosDeploymentTarget",
       "expo-router",
       "expo-font",
       "expo-image",
