@@ -22,6 +22,7 @@ import Animated, {
 } from 'react-native-reanimated'
 import { useShelf } from '../../src/store/shelf'
 import { Thumbnail } from '../../src/components/Thumbnail'
+import { ShimmerText } from '../../src/components/ShimmerText'
 import { sourceIcon } from '../../src/data/source'
 import { titleAccent, formatConsumeTime } from '../../src/data/title'
 import { Colors, FontFamily, Spacing, Radius } from '../../src/constants/tokens'
@@ -117,10 +118,14 @@ export default function LinkDetailScreen() {
         {/* Body */}
         <View style={styles.body}>
           {/* Title */}
-          <Text style={styles.title}>
-            {accent ? <Text style={styles.titleDescriptor}>{accent} </Text> : null}
-            <Text style={styles.titleMain}>{rest}</Text>
-          </Text>
+          {link.status === 'processing' ? (
+            <ShimmerText text={link.source} style={styles.titleMain} numberOfLines={2} />
+          ) : (
+            <Text style={styles.title}>
+              {accent ? <Text style={styles.titleDescriptor}>{accent} </Text> : null}
+              <Text style={styles.titleMain}>{rest}</Text>
+            </Text>
+          )}
 
           {/* Source + consume time */}
           <View style={styles.metaWrap}>

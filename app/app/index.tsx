@@ -23,6 +23,7 @@ import { Link, Project } from '../src/types'
 import { titleAccent, formatConsumeTime } from '../src/data/title'
 import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
 import { Thumbnail } from '../src/components/Thumbnail'
+import { ShimmerText } from '../src/components/ShimmerText'
 import { SpeedDialFab } from '../src/components/SpeedDialFab'
 import { NewProjectSheet } from '../src/components/NewProjectSheet'
 import { NewLinkSheet } from '../src/components/NewLinkSheet'
@@ -159,10 +160,16 @@ function LinkCard({ link, width = CARD_WIDTH }: { link: Link; width?: number }) 
         />
         {link.consumeTime ? <ConsumeTimeBadge seconds={link.consumeTime} /> : null}
       </View>
-      <Text style={styles.cardTitle} numberOfLines={3}>
-        {accent ? <Text style={styles.cardDescriptor}>{accent} </Text> : null}
-        <Text style={styles.cardTitleMain}>{rest}</Text>
-      </Text>
+      {link.status === 'processing' ? (
+        <View style={styles.cardTitle}>
+          <ShimmerText text={link.source} style={styles.cardTitleMain} numberOfLines={1} />
+        </View>
+      ) : (
+        <Text style={styles.cardTitle} numberOfLines={3}>
+          {accent ? <Text style={styles.cardDescriptor}>{accent} </Text> : null}
+          <Text style={styles.cardTitleMain}>{rest}</Text>
+        </Text>
+      )}
     </Pressable>
   )
 }

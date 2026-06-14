@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Keyboard, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native'
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text } from 'react-native'
 import {
   BottomSheetBackdrop,
   BottomSheetBackdropProps,
@@ -7,36 +7,23 @@ import {
   BottomSheetScrollView,
   BottomSheetTextInput,
 } from '@gorhom/bottom-sheet'
-import { Ionicons } from '@expo/vector-icons'
 import { useShelf } from '../store/shelf'
-import { Link } from '../types'
 import { isValidLink, normalizeUrl } from '../data/processLink'
-import { Skeleton } from './Skeleton'
 import { Colors, FontFamily, Radius, Spacing } from '../constants/tokens'
-
-type Phase = 'input' | 'processing' | 'ready'
 
 export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: string | null }>(
   ({ presetProjectId }, ref) => {
     const sheetRef = useRef<BottomSheetModal>(null)
     useImperativeHandle(ref, () => sheetRef.current as BottomSheetModal)
 
-    const { projects, createItem, updateItem, addItemTags } = useShelf()
-    const requestId = useRef(0)
+    const { projects, createItem } = useShelf()
 
-    const [phase, setPhase] = useState<Phase>('input')
     const [url, setUrl] = useState('')
-    const [name, setName] = useState('')
-    const [tagDraft, setTagDraft] = useState('')
-    const [tags, setTags] = useState<string[]>([])
-    const [projectId, setProjectId] = useState<string | null>(null)
-    const [reminder, setReminder] = useState(false)
-    const [created, setCreated] = useState<Link | null>(null)
-    const [deduped, setDeduped] = useState(false)
+    const [projectId, setProjectId] = useState<string | null>(presetProjectId)
+    const [submitting, setSubmitting] = useState(false)
     const [failed, setFailed] = useState(false)
 
-    const snapPoints = useMemo(() => ['40%', '92%'], [])
-    const expanded = phase !== 'input'
+    const snapPoints = useMemo(() => ['50%'], [])
 
     // Selected project first so it's visible without scrolling the row.
     const orderedProjects = useMemo(() => {
@@ -47,79 +34,31 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
     }, [projects, presetProjectId])
 
     const initForm = () => {
-      requestId.current += 1
-      setPhase('input')
       setUrl('')
-      setName('')
-      setTagDraft('')
-      setTags([])
       setProjectId(presetProjectId)
-      setReminder(false)
-      setCreated(null)
-      setDeduped(false)
+      setSubmitting(false)
       setFailed(false)
     }
 
-    // Track the active project while the form is untouched (input phase), so
-    // opening from a different project picks the right default without a flash.
-    useEffect(() => {
-      if (phase === 'input') setProjectId(presetProjectId)
-    }, [presetProjectId, phase])
+    // Keep the default project in sync with the active project while untouched.
+    useEffect(() => setProjectId(presetProjectId), [presetProjectId])
 
-    const startProcessing = () => {
-      if (phase !== 'input' || !isValidLink(url)) return
-      const reqId = (requestId.current += 1)
-      const target = normalizeUrl(url)
-      setPhase('processing')
+    const canAdd = isValidLink(url) && !submitting
+
+    // Hand the link to the backend and dismiss immediately — enrichment (name,
+    // thumbnail, tags) happens in the worker and streams into the feed card,
+    // which shows a loading state until it lands. No need to wait here.
+    const add = () => {
+      if (!canAdd) return
+      setSubmitting(true)
       setFailed(false)
       Keyboard.dismiss()
-      sheetRef.current?.snapToIndex(1)
-      createItem(target, projectId)
-        .then(({ item, deduped }) => {
-          if (reqId !== requestId.current) return
-          setCreated(item)
-          setDeduped(deduped)
-          setName(item.name)
-          setTags(item.tags)
-          setProjectId(item.projectId)
-          setReminder(item.reminderEnabled)
-          setPhase('ready')
-        })
+      createItem(normalizeUrl(url), projectId)
+        .then(() => sheetRef.current?.dismiss())
         .catch(() => {
-          if (reqId !== requestId.current) return
-          // Create failed: nothing entered the feed. Return to input so the
-          // user can try again.
           setFailed(true)
-          setPhase('input')
+          setSubmitting(false)
         })
-    }
-
-    const addTag = () => {
-      const cleaned = tagDraft.trim().replace(/^#+/, '')
-      if (!cleaned) return
-      const tag = `#${cleaned}`
-      setTags(prev => (prev.includes(tag) ? prev : [...prev, tag]))
-      setTagDraft('')
-    }
-
-    const removeTag = (tag: string) => setTags(prev => prev.filter(t => t !== tag))
-
-    const canFetch = phase === 'input' && isValidLink(url)
-    const canSave = phase === 'ready' && created !== null
-
-    const save = () => {
-      if (!canSave || !created) return
-      void updateItem(created.id, {
-        // Omit name when blank so the worker's AI name lands; writing '' would
-        // block it (worker keeps any non-null name).
-        ...(name.trim() ? { name: name.trim() } : {}),
-        projectId,
-        reminderEnabled: reminder,
-      })
-      // Tags merge additively (atomic) so the worker's AI tags aren't clobbered.
-      void addItemTags(created.id, tags)
-      Keyboard.dismiss()
-      sheetRef.current?.dismiss()
     }
 
     const renderBackdrop = useCallback(
@@ -147,127 +86,45 @@ export const NewLinkSheet = forwardRef<BottomSheetModal, { presetProjectId: stri
 
           <Text style={styles.label}>Link</Text>
           <BottomSheetTextInput
-            style={[styles.input, !expanded && styles.inputLink]}
+            style={styles.input}
             placeholder="https://…"
             placeholderTextColor={Colors.textSecondary}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
             autoFocus
-            editable={phase === 'input'}
+            editable={!submitting}
             value={url}
             onChangeText={setUrl}
-            onSubmitEditing={() => canFetch && startProcessing()}
+            onSubmitEditing={add}
             returnKeyType="go"
           />
-          {!expanded && (
-            <>
-              {failed ? (
-                <Text style={styles.errorNote}>Couldn’t add that link — try again.</Text>
-              ) : (
-                <Text style={styles.hint}>Paste a link, then tap Continue.</Text>
-              )}
-              <Pressable
-                style={[styles.button, !canFetch && styles.buttonDisabled]}
-                onPress={startProcessing}
-                disabled={!canFetch}
-              >
-                <Text style={styles.buttonText}>Continue</Text>
-              </Pressable>
-            </>
+          {failed ? (
+            <Text style={styles.errorNote}>Couldn’t add that link — try again.</Text>
+          ) : (
+            <Text style={styles.hint}>Paste a link — we’ll do the rest.</Text>
           )}
 
-          {expanded && (
-            <>
-              {deduped && (
-                <Text style={styles.errorNote}>Already in your shelf — editing the saved copy.</Text>
-              )}
-              <Text style={styles.label}>Name</Text>
-              {phase === 'processing' ? (
-                <Skeleton width="100%" height={50} radius={Radius.card} />
-              ) : (
-                <BottomSheetTextInput
-                  style={styles.input}
-                  placeholder="Name"
-                  placeholderTextColor={Colors.textSecondary}
-                  value={name}
-                  onChangeText={setName}
-                />
-              )}
+          <Text style={styles.label}>Project</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.projectRow}
+          >
+            <ProjectChip label="None" active={projectId === null} onPress={() => setProjectId(null)} />
+            {orderedProjects.map(p => (
+              <ProjectChip
+                key={p.id}
+                label={p.name}
+                active={projectId === p.id}
+                onPress={() => setProjectId(p.id)}
+              />
+            ))}
+          </ScrollView>
 
-              <Text style={styles.label}>Tags</Text>
-              {(tags.length > 0 || phase === 'processing') && (
-                <View style={styles.tagsRow}>
-                  {tags.map(tag => (
-                    <Pressable key={tag} style={styles.tagChip} onPress={() => removeTag(tag)}>
-                      <Text style={styles.tagChipText}>{tag}</Text>
-                      <Ionicons name="close" size={13} color={Colors.primary} />
-                    </Pressable>
-                  ))}
-                  {phase === 'processing' && (
-                    <>
-                      <Skeleton width={84} height={32} radius={Radius.pill} />
-                      <Skeleton width={64} height={32} radius={Radius.pill} />
-                      <Skeleton width={92} height={32} radius={Radius.pill} />
-                    </>
-                  )}
-                </View>
-              )}
-              <View style={styles.tagInputRow}>
-                <BottomSheetTextInput
-                  style={[styles.input, styles.flex]}
-                  placeholder="Add a tag"
-                  placeholderTextColor={Colors.textSecondary}
-                  autoCapitalize="none"
-                  value={tagDraft}
-                  onChangeText={setTagDraft}
-                  onSubmitEditing={addTag}
-                  returnKeyType="done"
-                />
-                <Pressable style={styles.addTagButton} onPress={addTag}>
-                  <Ionicons name="add" size={22} color={Colors.surface} />
-                </Pressable>
-              </View>
-
-              <Text style={styles.label}>Project</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.projectRow}
-              >
-                <ProjectChip label="None" active={projectId === null} onPress={() => setProjectId(null)} />
-                {orderedProjects.map(p => (
-                  <ProjectChip
-                    key={p.id}
-                    label={p.name}
-                    active={projectId === p.id}
-                    onPress={() => setProjectId(p.id)}
-                  />
-                ))}
-              </ScrollView>
-
-              <View style={styles.reminderRow}>
-                <View style={styles.flex}>
-                  <Text style={styles.reminderLabel}>Nudge me</Text>
-                  <Text style={styles.reminderSub}>Send a gentle poke to come back to this</Text>
-                </View>
-                <Switch
-                  value={reminder}
-                  onValueChange={setReminder}
-                  trackColor={{ false: '#D9D3C8', true: Colors.primary }}
-                  thumbColor={Colors.surface}
-                />
-              </View>
-
-              <Pressable
-                style={[styles.button, !canSave && styles.buttonDisabled]}
-                onPress={save}
-                disabled={!canSave}
-              >
-                <Text style={styles.buttonText}>Save</Text>
-              </Pressable>
-            </>
-          )}
+          <Pressable style={[styles.button, !canAdd && styles.buttonDisabled]} onPress={add} disabled={!canAdd}>
+            <Text style={styles.buttonText}>{submitting ? 'Adding…' : 'Add'}</Text>
+          </Pressable>
         </BottomSheetScrollView>
       </BottomSheetModal>
     )
@@ -303,9 +160,6 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
   },
-  flex: {
-    flex: 1,
-  },
   content: {
     paddingHorizontal: Spacing.screenH,
     paddingTop: 8,
@@ -335,9 +189,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Colors.primary,
   },
-  inputLink: {
-    marginBottom: 2,
-  },
   hint: {
     fontFamily: FontFamily.sans,
     fontSize: 13,
@@ -349,40 +200,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: Colors.accent,
     marginTop: 8,
-  },
-  tagsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 8,
-  },
-  tagChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderRadius: Radius.pill,
-    borderWidth: 1.5,
-    borderColor: Colors.primary,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  tagChipText: {
-    fontFamily: FontFamily.sans,
-    fontSize: 13,
-    color: Colors.primary,
-  },
-  tagInputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  addTagButton: {
-    width: 48,
-    height: 48,
-    borderRadius: Radius.card,
-    backgroundColor: Colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   projectRow: {
     gap: 8,
@@ -408,24 +225,6 @@ const styles = StyleSheet.create({
   },
   projectChipTextActive: {
     color: Colors.surface,
-  },
-  reminderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 16,
-    gap: 12,
-  },
-  reminderLabel: {
-    fontFamily: FontFamily.sansMedium,
-    fontSize: 15,
-    color: Colors.primary,
-  },
-  reminderSub: {
-    fontFamily: FontFamily.sans,
-    fontSize: 12,
-    color: Colors.textSecondary,
-    marginTop: 2,
   },
   button: {
     backgroundColor: Colors.primary,
