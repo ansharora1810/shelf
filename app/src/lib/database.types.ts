@@ -105,4 +105,6 @@ export type Database = {
 export type ItemRow = Database['public']['Tables']['items']['Row']
 export type ProjectRow = Database['public']['Tables']['projects']['Row']
 export type ItemStatus = 'awaiting_upload' | 'processing' | 'ready' | 'failed'
-export type ItemSource = 'youtube' | 'instagram' | 'website'
+// `source` is the link's real host (e.g. "youtube.com", "tiktok.com",
+// "nytimes.com"); the app maps a known subset to logos with a fallback.
+export type ItemSource = string

@@ -22,18 +22,13 @@ import Animated, {
 } from 'react-native-reanimated'
 import { useShelf } from '../../src/store/shelf'
 import { Thumbnail } from '../../src/components/Thumbnail'
+import { sourceIcon } from '../../src/data/source'
 import { titleAccent, formatConsumeTime } from '../../src/data/title'
 import { Colors, FontFamily, Spacing, Radius } from '../../src/constants/tokens'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
 const THUMBNAIL_HEIGHT = 280
 const PARALLAX_FACTOR = 0.2
-
-const SOURCE_ICONS: Record<string, 'logo-youtube' | 'logo-instagram' | 'globe-outline'> = {
-  youtube: 'logo-youtube',
-  instagram: 'logo-instagram',
-  website: 'globe-outline',
-}
 
 const AnimatedScrollView = Animated.createAnimatedComponent(ScrollView)
 
@@ -76,14 +71,6 @@ export default function LinkDetailScreen() {
       </SafeAreaView>
     )
   }
-
-  const domain = (() => {
-    try {
-      return new URL(link.url).hostname.replace('www.', '')
-    } catch {
-      return link.url
-    }
-  })()
 
   const { accent, rest } = titleAccent(link.name)
 
@@ -138,8 +125,8 @@ export default function LinkDetailScreen() {
           {/* Source + consume time */}
           <View style={styles.metaWrap}>
             <View style={styles.sourceRow}>
-              <Ionicons name={SOURCE_ICONS[link.source]} size={14} color={Colors.primary} />
-              <Text style={styles.sourceDomain}>{domain}</Text>
+              <Ionicons name={sourceIcon(link.source)} size={14} color={Colors.primary} />
+              <Text style={styles.sourceDomain}>{link.source}</Text>
             </View>
             {link.consumeTime ? (
               <View style={styles.consumeRow}>

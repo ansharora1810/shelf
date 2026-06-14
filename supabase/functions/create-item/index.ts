@@ -1,7 +1,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { normalizeUrl } from "../_shared/url.ts";
-import { classifySource, ItemSource } from "../_shared/source.ts";
+import { classifySource, isYouTube, isInstagram } from "../_shared/source.ts";
 import {
   resolveFinalUrl,
   fetchWebsiteFast,
@@ -74,7 +74,7 @@ Deno.serve(async (req) => {
   // We race the enrichment against the timeout; on timeout we proceed with
   // whatever resolved — a slow origin is not an error.
   // -------------------------------------------------------------------------
-  let source: ItemSource = classifySource(rawUrl); // fallback if resolution fails
+  let source = classifySource(rawUrl); // fallback host if resolution fails
   let title: string | null = null;
   let thumbnailUrl: string | null = null;
 
@@ -86,6 +86,8 @@ Deno.serve(async (req) => {
   } catch {
     // Timeout or fetch error — proceed with the fallback source and null fields.
   }
+
+  
 
   // -------------------------------------------------------------------------
   // Insert the row. Uses caller JWT → RLS sets user_id = auth.uid().
@@ -123,15 +125,14 @@ Deno.serve(async (req) => {
 // IP, unlike scraping the watch page (which hits a consent wall).
 async function enrich(
   rawUrl: string
-): Promise<{ source: ItemSource; title: string | null; thumbnailUrl: string | null }> {
+): Promise<{ source: string; title: string | null; thumbnailUrl: string | null }> {
   const finalUrl = await resolveFinalUrl(rawUrl, ENRICH_TIMEOUT_MS);
   const source = classifySource(finalUrl);
-  const parsed =
-    source === "youtube"
-      ? await fetchYoutubeFast(finalUrl, ENRICH_TIMEOUT_MS)
-      : source === "instagram"
-      ? await fetchInstagramFast(finalUrl, ENRICH_TIMEOUT_MS)
-      : await fetchWebsiteFast(finalUrl, ENRICH_TIMEOUT_MS);
+  const parsed = isYouTube(source)
+    ? await fetchYoutubeFast(finalUrl, ENRICH_TIMEOUT_MS)
+    : isInstagram(source)
+    ? await fetchInstagramFast(finalUrl, ENRICH_TIMEOUT_MS)
+    : await fetchWebsiteFast(finalUrl, ENRICH_TIMEOUT_MS);
   return { source, ...parsed };
 }
 

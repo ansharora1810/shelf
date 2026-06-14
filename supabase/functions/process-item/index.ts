@@ -1,6 +1,6 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
-import { classifySource } from "../_shared/source.ts";
+import { classifySource, isYouTube, isInstagram } from "../_shared/source.ts";
 import {
   resolveFinalUrl,
   fetchWebsiteContent,
@@ -89,7 +89,7 @@ async function processItem(
   // YouTube/Instagram must be parsed as such, not as a generic website.
   const url: string = item.url ?? "";
   const finalUrl = await resolveFinalUrl(url, 8_000);
-  const source: "youtube" | "instagram" | "website" = classifySource(finalUrl);
+  const source = classifySource(finalUrl);
 
   // 3. Fetch full content.
   let rawContent: string | null = null;
@@ -166,11 +166,11 @@ async function processItem(
 // ---------------------------------------------------------------------------
 
 async function fetchContent(
-  source: "youtube" | "instagram" | "website",
+  source: string,
   url: string
 ): Promise<{ rawContent: string | null; consumeTime: number | null; thumbnailUrl: string | null }> {
-  if (source === "youtube") return fetchYoutubeContent(url);
-  if (source === "instagram") return fetchInstagramContent(url);
+  if (isYouTube(source)) return fetchYoutubeContent(url);
+  if (isInstagram(source)) return fetchInstagramContent(url);
   return fetchWebsiteContent(url);
 }
 

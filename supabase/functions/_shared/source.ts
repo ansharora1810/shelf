@@ -1,18 +1,32 @@
-export type ItemSource = "youtube" | "instagram" | "website";
+// `source` is the link's real, normalized host (e.g. "youtube.com",
+// "tiktok.com", "nytimes.com") — the destination's identity, not a capability
+// bucket. Parsers and logos are chosen downstream by host with a fallback, so
+// an unrecognised host keeps its true identity instead of becoming "website".
 
-export function classifySource(url: string): ItemSource {
-  let hostname: string;
+const SUBDOMAIN_PREFIX = /^(www\.|m\.|mobile\.)/;
+const HOST_ALIASES: Record<string, string> = {
+  "youtu.be": "youtube.com",
+};
+
+export function classifySource(url: string): string {
+  let host: string;
   try {
-    hostname = new URL(url).hostname.toLowerCase();
+    host = new URL(url).hostname.toLowerCase();
   } catch {
-    return "website";
+    return "website"; // unparseable — last-resort label
   }
+  host = host.replace(SUBDOMAIN_PREFIX, "");
+  return HOST_ALIASES[host] ?? host;
+}
 
-  if (hostname === "youtube.com" || hostname.endsWith(".youtube.com") || hostname === "youtu.be") {
-    return "youtube";
-  }
-  if (hostname === "instagram.com" || hostname.endsWith(".instagram.com")) {
-    return "instagram";
-  }
-  return "website";
+function matchesPlatform(host: string, base: string): boolean {
+  return host === base || host.endsWith(`.${base}`);
+}
+
+export function isYouTube(host: string): boolean {
+  return matchesPlatform(host, "youtube.com");
+}
+
+export function isInstagram(host: string): boolean {
+  return matchesPlatform(host, "instagram.com");
 }
