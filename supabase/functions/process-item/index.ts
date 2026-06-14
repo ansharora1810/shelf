@@ -105,8 +105,11 @@ async function processItem(
     // Proceed with nulls — degrade to ready with what we have.
   }
 
-  // 4. Build the prompt context for Gemini.
-  const promptContext = buildPromptContext(item.name, rawContent, url, source);
+  // 4. Build the prompt context for Gemini. Prefer a user-set name, else the
+  //    deterministic title we just fetched — `item.name` is null on the
+  //    create path, and the title is often the only signal (e.g. a YouTube
+  //    video whose transcript couldn't be fetched).
+  const promptContext = buildPromptContext(item.name?.trim() ? item.name : title, rawContent, url);
 
   // 5. One Gemini call for structured output.
   let aiResult: GeminiResult | null = null;
@@ -166,20 +169,19 @@ async function processItem(
 // Gemini structured-output call
 // ---------------------------------------------------------------------------
 
+// Only non-empty signals go into the prompt. URL is always present; title and
+// content are included only when the worker actually got them — never as empty
+// placeholders that would invite the model to fill the gap by guessing.
 function buildPromptContext(
   name: string | null,
   rawContent: string | null,
-  url: string,
-  source: string
+  url: string
 ): string {
-  const parts: string[] = [];
+  const parts: string[] = [`URL: ${url}`];
   if (name) parts.push(`Title: ${name}`);
-  parts.push(`URL: ${url}`);
-  parts.push(`Source type: ${source}`);
   if (rawContent) {
     // Truncate to keep well within the context limit and edge cost.
-    const truncated = rawContent.slice(0, 12_000);
-    parts.push(`Content:\n${truncated}`);
+    parts.push(`Content:\n${rawContent.slice(0, 12_000)}`);
   }
   return parts.join("\n\n");
 }
@@ -197,14 +199,18 @@ async function callGemini(context: string): Promise<GeminiResult> {
 }
 
 async function callGeminiOnce(context: string): Promise<GeminiResult> {
-  const prompt = `You are a content librarian. Given the following content, produce a structured JSON response.
+  const prompt = `You are a content librarian. Produce a structured JSON response using ONLY the fields provided below.
 
 ${context}
 
-Rules:
+Grounding rules — do not violate:
+- Rely only on the fields given. Never invent facts, topics, or details that are not present.
+- If the only signal is the URL (no Title, no Content), infer a generic name, summary, and tags from the URL itself — its domain and path. A general, honest description grounded in the URL is far better than a specific guess about content you cannot see.
+
+Output rules:
 - name: a concise, descriptive title (max 80 characters)
-- summary: 1-3 sentence summary of what this content is about
-- tags: exactly 10 tags, each kebab-case with a leading #, e.g. #deep-work. Be specific and useful for discovery.`;
+- summary: 1-3 sentence summary of what this content is about; keep it general when the only signal is the URL
+- tags: exactly 10 tags, each kebab-case with a leading #, e.g. #deep-work. Be specific when Title/Content are present; otherwise derive them from the URL and domain.`;
 
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
