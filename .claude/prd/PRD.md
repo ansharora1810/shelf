@@ -107,6 +107,11 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 | Reminder notification delivery | v1 stores the toggle only; scheduling/delivery (local or push) is v2 (§8.5). |
 | Image & PDF items | URL-kind items first; images/PDFs add upload UI, file limits, PDF text extraction, image vision-for-tagging. Data model keeps a generic `type` so they slot in later. When built, files go to **Supabase Storage** (not raw S3 — stays in one platform, integrates with RLS/auth). |
 | Global dedup | v1 dedups per-user only. v2: if any user already processed a URL, copy the processed result instead of re-parsing (§8.3). |
+| YouTube transcript & duration | Blocked server-side: YouTube IP-walls the worker's datacenter egress (confirmed across oEmbed/youtubei.js/youtube-transcript/yt-dlp — §8.4). v1 ships oEmbed **title + thumbnail** only; AI tags from the title. Recovery needs residential/proxied egress. |
+| Client-side transcript fetch | Leading v2 approach for the above: the app fetches the transcript on the phone's residential IP (not IP-walled) and passes it to the worker. Caveat: the iOS share extension is a constrained sandbox, so shared links would defer the fetch to next app open (§8.4). |
+| Non-video YouTube pages | Channels / playlists / shorts-feed parse early to nothing today; dedicated handling deferred. |
+| Moti animations | Blocked: Moti has no stable Reanimated 4 support (app is on Reanimated 4 + New Arch). Revisit when the library catches up; until then animations use Reanimated 4 directly. |
+| NativeWind (Tailwind styling) | Deferred — large migration that overlaps the existing `tokens.ts` design system; no functional gain. Revisit incrementally on new screens if desired. |
 | Read-only link sharing | Nice, not core to the save→find→consume loop |
 | Collaborative collections | Significant scope |
 | Android | Validate on iOS first |
@@ -166,25 +171,20 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 
 ![Post-processing overlay wireframe](assets/wireframe-post-processing.png)
 
-The in-app **manual add** flow (`+` → enter URL). On `POST /items`, the popup expands to show the **non-AI** fields the create returned, and lets the user optionally tag before committing. It does **not** wait for AI — tags/summary stream in afterwards. The share extension does not use this popup (§6.10); file adds skip it entirely (§8.8).
+The in-app **manual add** flow (`+` → enter URL). The sheet is **single-phase**: paste a URL, optionally pick a project, tap **Add** — and it dismisses immediately. It does **not** expand, wait, or edit metadata. `create-item` returns instantly (§8.7) and the new card appears in the feed in `processing`, where name/thumbnail/tags stream in from the worker. The share extension does not use this popup (§6.10); file adds skip it entirely (§8.8).
 
-**Flow:** enter URL → `POST /items` → popup expands with returned details → user optionally adds tags/project → **Save** → `PUT /items/:id` writes the user fields → item appears in the feed (still `processing` for AI).
+**Flow:** enter URL → optionally pick project → **Add** → `POST /items` (instant insert) → sheet dismisses → card appears in the feed at `processing` → enrichment streams in via Realtime.
 
 **Fields:**
 
 | Field | Behaviour |
 |---|---|
-| Name | Editable, pre-filled with the returned `title`. **Optional at Save** — when the create response has no title (origin blocked fast scraping), leaving it blank does not write `name`, so the worker's AI name fills in. Save is never gated on name. |
-| Source | Shown (platform icon), immutable |
-| Consume time | Shown when returned, immutable |
-| Tags | Optional, user-entered; AI tags merge in later |
-| Project | Optional, autocomplete from existing projects |
-| Link | Immutable |
-| Reminder | Push notification toggle |
+| Link | The URL to save |
+| Project | Optional, choose from existing projects (pre-selected when adding from a project) |
 
-Summary is AI-generated and not shown here — it fills in on the item later.
+Name, thumbnail, summary, and tags are no longer edited here — they're AI/worker-generated and editable later on the item detail screen. This keeps the add action instant (the win for the share-and-forget path).
 
-**Actions:** Save button + swipe down to dismiss
+**Actions:** Add button + swipe down to dismiss
 
 ---
 
@@ -414,7 +414,7 @@ flowchart LR
 | `embedding` | Derived (**v2**) | `raw_content + current name + current tags` → one vector. Not generated in v1 (search is client-side keyword, §8.6) |
 | `project_id` | Yes | Optional; FK → `projects.id`. On project delete, either the items are deleted or `project_id` is set null, per the `delete_items` flag (§8.7) |
 | `reminder_enabled` | Yes | Push notification toggle |
-| `source` | No | `instagram` / `youtube` / `website`. Anything outside YouTube/Instagram (TikTok, X, etc.) classifies as `website` in v1 — no dedicated parse strategy (§8.4) |
+| `source` | No | The link's **real normalized host** (e.g. `youtube.com`, `nytimes.com`), via `tldts`. Not a fixed bucket — an unrecognized host keeps its true identity. YouTube/Instagram get dedicated parsers; everything else uses the website parser (§8.4) |
 | `created_at` | No | Save timestamp; drives the week-grouped feed |
 
 **Projects:**
@@ -493,16 +493,20 @@ The client only ever *reflects* a backend status; it never decides "failed" on a
 
 ### 8.4 Content parsing
 
+Parsing lives in a small **OOP module** (`_shared/parsers/`): a `Parser` interface with `fetchContent(url)`, one class per platform (`WebsiteParser`, `YoutubeParser`, `InstagramParser`), and a `getParser(source)` factory. All parsing runs in the **worker**, never in `create-item` (§8.7).
+
 | Source | Method | Notes |
 |---|---|---|
-| YouTube | Official oEmbed/Data API + unofficial transcript API | Transcript fetch is async; fallback to title + description if unavailable |
-| Instagram | HTML scraping of public pages | ToS risk accepted; public posts only; maintenance liability |
-| Websites | Full page text fetch | Full text → AI for tagging; search operates on tags + title only (not raw page text) |
+| YouTube | **oEmbed** (title + thumbnail) | Transcript + duration are **not available server-side** — YouTube IP-walls the datacenter egress. Confirmed by testing oEmbed (works), youtubei.js (metadata stripped), youtube-transcript (explicit captcha/too-many-requests), yt-dlp (can't run in Edge). Transcript/duration deferred to v2 (§2). AI tags from the title. |
+| Instagram | **Private web GraphQL** endpoint (full caption) | URL is first classified (post / reel / story / profile / feed / other); caption + thumbnail fetched only for posts & reels. OG-meta scrape is the fallback. ToS risk accepted; public content only; relies on an undocumented `doc_id` (maintenance liability). |
+| Websites | Full page text fetch (OG meta + body text) | Full text → AI for tagging; search operates on tags + title only (not raw page text). |
+
+URL handling uses standard libraries — `normalize-url` (canonicalize, add scheme, strip tracking params for the dedup key) and `tldts` (robust host extraction, handles scheme-less / messy input where `new URL()` throws).
 
 **`consume_time` derivation:**
 - **Websites / articles:** estimate from `raw_content` word count at ~225 wpm → seconds.
-- **YouTube:** actual video length from the oEmbed/Data API.
-- **Instagram:** none — `null` (no natural duration; badge hidden).
+- **YouTube:** `null` in v1 — video length isn't obtainable from the worker's IP (see above); returns with title + thumbnail only.
+- **Instagram:** reel/video duration when present, else `null` (no natural duration; badge hidden).
 - **Images / PDFs (deferred):** images `null`; PDFs may estimate from extracted text word count.
 
 ### 8.5 AI tagging & share extension architecture
@@ -543,7 +547,7 @@ Most of the surface is **not** a hand-written endpoint — the app calls Supabas
 |---|---|---|---|
 | GET | `/items` | Direct + RLS | Load all items (full rows) |
 | GET | `/projects` | Direct + RLS | Load all projects on open (catches empty projects) |
-| POST | `/items` | **Lambda** | **Create** — body branches on kind. **Link:** `{ url, project_id? }` → fast non-AI enrichment (`source`, `title`, `thumbnail_url`, `consume_time`), row at `processing`, returns the entity; idempotent on `normalized_url` collision (§8.3). **File (v2):** `{ type, filetype, size, project_id? }` (app pre-validates) → row at `awaiting_upload`, returns `{ id, upload_url }` (presigned PUT, 3-min TTL, type/size-constrained, id in object key). See §8.8 |
+| POST | `/items` | **Edge fn** | **Create** — body branches on kind. **Link:** `{ url, project_id? }` → **normalize → dedup → insert at `processing` → return**, a sub-100ms DB-only op with **no network calls** (`source` is a best-effort from the normalized host). All enrichment — title, thumbnail, resolved source, content, AI — is the **worker's** job, fired by the insert trigger; this keeps the create response (and the share sheet) instant. Idempotent on `normalized_url` collision (§8.3). **File (v2):** `{ type, filetype, size, project_id? }` (app pre-validates) → row at `awaiting_upload`, returns `{ id, upload_url }` (presigned PUT, 3-min TTL, type/size-constrained, id in object key). See §8.8 |
 | PUT | `/items/:id` | Direct + RLS | **Update** — manual-add Save (user tags / project / name) and later edits. A name/tag change fires the async re-embed trigger (§8.6) |
 | POST | `/items/:id/reprocess` | **Lambda (v2)** | **Retry** a `failed` item (§8.2). Guarded `failed → processing`, resets `processing_started_at`, re-invokes the worker. Artifact present (file in storage / link URL) → just re-invoke; a file upload that never landed → returns a fresh `{ upload_url }` and sets `awaiting_upload` so the app re-uploads. **v1 has no retry** (failed → Remove) |
 | POST | `/search` | **Lambda (v2)** | Semantic search — embeds the query, pgvector similarity, returns items (§8.6). **v1 search is client-side keyword, no endpoint** |
@@ -684,11 +688,17 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | **No provisioned concurrency** — accept cold starts; SnapStart/slim-package if `create` latency hurts | PC is a fixed ~$5–11/mo always-on charge (no free tier) for near-zero benefit | §8.9 |
 | Worker modes: `process` (v1) / `reembed` (v2, embed-only) — one codebase | Re-embed shares the worker without re-running the pipeline or clobbering user tags | §8.6, §8.9 |
 | Re-embed on edit (v2) is **async** (trigger → worker), not synchronous | `PUT` is direct-to-Supabase (no server hook, no client key); a few seconds of search staleness is harmless | §8.6 |
-| `source` = `youtube`/`instagram`/`website`; everything else (incl. TikTok) is `website` in v1; keep the field (backend-authoritative classifier, remove client `inferSource` on build) | No dedicated TikTok parse in v1; one classifier not two | §8.1, §8.4 |
+| `source` = the link's **real normalized host** (not a fixed youtube/instagram/website bucket); backend-authoritative classifier via `tldts` | Preserves the destination's true identity; one robust classifier | §8.1, §8.4 |
+| **All enrichment moved to the worker**; `create-item` is a fast DB-only op (normalize → dedup → insert → return, no network) | Instant create response → snappy share sheet (the common path); eliminates the create-then-worker double-fetch; worker owns title/thumbnail/source/content/AI | §8.7, §8.8 |
+| Parsing is an **OOP module** — `Parser` interface, per-platform classes, `getParser(source)` factory | Replaces a monolithic file; adding a platform = one class + one factory line | §8.4 |
+| URL handling via **`normalize-url` + `tldts`** (standard libs), not hand-rolled | Canonical dedup key + robust host from scheme-less/messy input (`new URL()` throws on those) | §8.3, §8.4 |
+| Instagram via the **private web GraphQL** endpoint; classify URL kind, caption only for posts/reels | Full caption (OG meta is truncated/login-gated); avoids fetching captions for stories/profiles | §8.4 |
+| Worker feeds Gemini only **non-empty signals** (URL always; title/content when present) with a **grounding prompt** | Prevents hallucination when title/content are absent — a generic URL-based summary beats an invented one | §8.5 |
 | `raw_content` immutable, user-agnostic, embedding base | Stable base; enables future global dedup | §8.1, §8.6 |
 | `consume_time` as integer seconds, formatted client-side, badge hidden when blank | Media-agnostic (read/watch/listen); sortable/locale-flexible vs a pre-formatted string; no empty pills | §8.1, §8.4, §6.2 |
 | Instagram scraping: ToS risk accepted, public posts only | Known maintenance liability | §8.4 |
-| YouTube: async transcript fetch, fallback to title + description | Transcript API is unofficial/fragile | §8.4 |
+| YouTube: **oEmbed only** (title + thumbnail); transcript + duration deferred to v2 | **Confirmed YouTube IP-walls the datacenter egress** — tested oEmbed (works), youtubei.js (metadata stripped), youtube-transcript (captcha), yt-dlp (can't run in Edge). No client lib beats an IP block; needs residential/proxied egress (§2) | §8.4 |
+| Deploy is **manual** via Supabase CLI/MCP — `git push` does **not** deploy Edge functions | Avoids the "pushed but stale in prod" trap | §10 |
 | Website search: tags + title only, not raw page text | Keep search precise; raw text is for tagging | §8.4, §8.6 |
 
 ### Design
@@ -696,12 +706,15 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 |---|---|---|
 | Warm, light, spacious; breathing room everywhere | The anti-Raindrop feel | §3 |
 | Micro-interactions: bouncy scroll bar (projects), parallax thumbnail (item detail), bottom-sheet slide-up (create/edit project + post-processing overlay) | — | §3 |
+| **Processing loading state** = `ShimmerText` — the host (e.g. `youtube.com`) shown muted with a left→right shine, on the feed card + detail while `processing`; swapped for the real title via Realtime | Informative placeholder (hints what's loading) vs a blank skeleton; built on Reanimated 4 + `expo-linear-gradient` (Expo Go-safe) | §6.3 |
+| Add-link sheet is **single-phase** (paste → Add → dismiss); no in-sheet name/tags/reminder editing | Matches the instant-create model; enrichment streams into the feed card | §6.3 |
+| Animations use **Reanimated 4 directly**; **Moti deferred** (no stable Reanimated 4 support); **NativeWind deferred** | Don't downgrade the whole stack for one wrapper; styling stays on `tokens.ts` | §2 |
 
 ---
 
 ## 10. Implementation status
 
-_Snapshot: 2026-06-13. The mock store has been replaced by a **real Supabase data layer** (direct client + RLS, Realtime fill-in, reconcile GETs, session-gated). The v1 backend (`create-item` + `process-item` worker) is built as **Supabase Edge Functions** and deployed; the pg_net trigger + pg_cron watchdog are live. Pending user action: set the `GEMINI_API_KEY` + `WORKER_SECRET` function secrets and the Vault `worker_secret` to light up AI tagging end-to-end. Share extension, onboarding, pricing/IAP, and all v2 items remain pending._
+_Snapshot: 2026-06-14. Real Supabase data layer (direct client + RLS, Realtime fill-in, reconcile GETs, session-gated). The v1 backend is **Supabase Edge Functions**, deployed; pg_net trigger + pg_cron watchdog live; AI tagging (Gemini) is active. **Enrichment responsibility shifted entirely to the worker** — `create-item` is now an instant DB-only op (normalize → dedup → insert → return), and `process-item` owns title/thumbnail/source/content/AI (OOP parser module). YouTube is **oEmbed-only** (title+thumbnail; transcript/duration IP-walled → v2). The add-link sheet is **single-phase**; the `processing` loading state is `ShimmerText`. Deploys are **manual** via the Supabase CLI/MCP (git push ≠ deploy). Share extension, onboarding, pricing/IAP, and all v2 items remain pending._
 
 | Area | Status | Notes |
 |---|---|---|
@@ -712,25 +725,28 @@ _Snapshot: 2026-06-13. The mock store has been replaced by a **real Supabase dat
 | Projects grid + detail | ✅ Done | 2-col grid, 2×2 collage, inline project detail view |
 | Calendar / date filter | ✅ Done | Marks days with items; day grid; clears on toggle |
 | Item detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
-| Add item / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
+| Add item / create / edit project | ✅ Done | **Add-link sheet is single-phase** (paste → Add → dismiss); enrichment streams into the feed card. Create/edit project bottom sheets on real data |
+| Processing loading state (`ShimmerText`) | ✅ Done | Host shown with a left→right shine on card + detail while `processing`; Reanimated 4 + `expo-linear-gradient` (§6.3) |
 | Search screen (v1 keyword) | ✅ Done | Tag browser + live keyword results over name/tags/summary, now over real loaded items. Semantic is v2 (§8.6) |
 | Reminder toggle | 🟡 Partial | UI toggle built; v1 only persists `reminder_enabled` — notification delivery is **v2** (§8.5) |
 | Card title rename + accent rule | ✅ Done | `descriptor`/`title` collapsed to single `name`; `titleAccent(name)` renders first two words in accent client-side (card + detail) (§8.1, §6.2, §6.4) |
 | Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
 | Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
 | Supabase schema + RLS | ✅ Done | `items` + `projects` tables, `user_id`-scoped RLS (insert/select/update/delete), partial dedup index, `moddatetime` triggers, Realtime publication. Store now mounts inside the auth gate, session-gated + re-fetch on login |
-| Backend function (`create-item`, Edge/Deno) | ✅ Done | `POST /items` create + fast OG/oEmbed enrichment, JWT verify, idempotent dedup. Deployed, `verify_jwt=true`. (Was specced as Python/Lambda — now Edge, §8.9.) `reprocess`/`POST /search` are v2 |
-| Worker (`process-item`, Edge/Deno) | 🟡 Built, needs secret | `process` mode: content fetch + Gemini structured call + guarded terminal write. Deployed `verify_jwt=false`, fired by pg_net trigger; pg_cron watchdog live. Needs `GEMINI_API_KEY` + `WORKER_SECRET`/Vault secret set to run AI |
-| Optimistic create + status lifecycle | ✅ Done | `status` enum live; create returns at `processing` with non-AI fields; watchdog bounds it (§8.2) |
+| Backend function (`create-item`, Edge/Deno) | ✅ Done | **Instant DB-only**: normalize → dedup → insert at `processing` → return. **No enrichment, no network** (best-effort `source` from the host). JWT verify, idempotent dedup. Deployed, `verify_jwt=true` |
+| Worker (`process-item`, Edge/Deno) | ✅ Done | Owns **all enrichment**: OOP parsers (oEmbed/IG-GraphQL/website) → deterministic title/thumbnail/source/content, then grounded Gemini call → name/summary/tags; guarded terminal write. Deployed `verify_jwt=false`, fired by pg_net trigger; pg_cron watchdog live |
+| Optimistic create + status lifecycle | ✅ Done | `status` enum live; create returns the row at `processing` (no enriched fields — worker fills them); watchdog bounds it (§8.2) |
 | Realtime fill-in | ✅ Done | Realtime channel on `items`/`projects`; reconcile GETs on session/foreground/re-subscribe, no polling (§8.2) |
 | Per-user dedup | ✅ Done | partial `unique (user_id, normalized_url)`; idempotent create returns `{deduped}`; conservative normalisation (§8.3) |
-| AI tagging (name/summary/tags) | 🟡 Built, needs key | Worker Gemini 2.5 Flash-Lite structured call built; activates once `GEMINI_API_KEY` is set (§8.5) |
-| Content parsing | ✅ Done | YouTube (oEmbed + transcript/length scrape), Instagram (OG caption), website (OG + full-text word-count) in the Edge fns (§8.4) |
+| AI tagging (name/summary/tags) | ✅ Done | Worker Gemini 2.5 Flash-Lite structured call, active. Grounded prompt (only non-empty signals; URL-based generic summary when title/content absent) to avoid hallucination (§8.5) |
+| Content parsing | ✅ Done | OOP parser module (`getParser`): YouTube **oEmbed-only** (transcript/duration IP-walled → v2), Instagram **GraphQL caption** (URL-kind classified, posts/reels only), website (OG + full-text word-count). `normalize-url`/`tldts` for URLs (§8.4) |
 | `raw_content` field | ✅ Done | Column live; worker writes it immutably as the v2-embedding base |
 | Semantic search + embeddings (v2) | ⛔ v2 | pgvector, `text-embedding-3-small`, `POST /search`, `reembed` (§8.6) |
 | Failure retry / `reprocess` (v2) | ⛔ v2 | v1 failed → Remove; reprocess endpoint + Try-again deferred (§8.2) |
 | Reminder delivery (v2) | ⛔ v2 | v1 stores toggle only; scheduling/notification deferred (§8.5) |
-| `consume_time` field | ✅ Done | Int seconds in DB; `formatConsumeTime()` renders the badge client-side, hidden when blank; derived on the backend (YouTube length / website word-count) (§8.4, §6.2) |
+| YouTube transcript + duration (v2) | ⛔ v2 | Server-side IP-walled; v1 ships oEmbed title+thumbnail only. v2 = client-side fetch (residential IP) or proxied API (§2, §8.4) |
+| Moti / NativeWind (v2) | ⛔ v2 | Moti blocked on Reanimated 4; NativeWind deferred (overlaps `tokens.ts`). Animations use Reanimated 4 directly (§2) |
+| `consume_time` field | ✅ Done | Int seconds in DB; `formatConsumeTime()` renders the badge client-side, hidden when blank; derived on the backend (website word-count; Instagram reel duration). YouTube length unavailable server-side → `null` in v1 (§8.4, §6.2) |
 | iOS share extension | ⛔ Pending | In-place sheet (URL + optional project) → `POST /items` via App Group JWT → backend async processing (§6.10, §8.5) |
 | Push notification reminders | ⛔ Pending | No `expo-notifications` integration |
 | Onboarding screens | ⛔ Pending | Only Login exists — no welcome / feature / notification-permission screens |
