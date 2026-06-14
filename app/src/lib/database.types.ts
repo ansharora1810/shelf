@@ -1,0 +1,108 @@
+// Generated from the live Supabase schema (project hpnxuouiyrhlqabkgmis).
+// Regenerate after schema changes: mcp__supabase__generate_typescript_types,
+// or `supabase gen types typescript`.
+
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[]
+
+export type Database = {
+  public: {
+    Tables: {
+      items: {
+        Row: {
+          consume_time: number | null
+          created_at: string
+          id: string
+          name: string | null
+          normalized_url: string | null
+          processing_started_at: string | null
+          project_id: string | null
+          raw_content: string | null
+          reminder_enabled: boolean
+          source: string | null
+          status: string
+          summary: string | null
+          tags: string[]
+          thumbnail_url: string | null
+          type: string
+          updated_at: string
+          url: string | null
+          user_id: string
+        }
+        Insert: {
+          consume_time?: number | null
+          created_at?: string
+          id?: string
+          name?: string | null
+          normalized_url?: string | null
+          processing_started_at?: string | null
+          project_id?: string | null
+          raw_content?: string | null
+          reminder_enabled?: boolean
+          source?: string | null
+          status?: string
+          summary?: string | null
+          tags?: string[]
+          thumbnail_url?: string | null
+          type?: string
+          updated_at?: string
+          url?: string | null
+          user_id?: string
+        }
+        Update: {
+          consume_time?: number | null
+          created_at?: string
+          id?: string
+          name?: string | null
+          normalized_url?: string | null
+          processing_started_at?: string | null
+          project_id?: string | null
+          raw_content?: string | null
+          reminder_enabled?: boolean
+          source?: string | null
+          status?: string
+          summary?: string | null
+          tags?: string[]
+          thumbnail_url?: string | null
+          type?: string
+          updated_at?: string
+          url?: string | null
+          user_id?: string
+        }
+      }
+      projects: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+          updated_at?: string
+          user_id?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+          updated_at?: string
+          user_id?: string
+        }
+      }
+    }
+  }
+}
+
+export type ItemRow = Database['public']['Tables']['items']['Row']
+export type ProjectRow = Database['public']['Tables']['projects']['Row']
+export type ItemStatus = 'awaiting_upload' | 'processing' | 'ready' | 'failed'
+export type ItemSource = 'youtube' | 'instagram' | 'website'

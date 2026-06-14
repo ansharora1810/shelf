@@ -174,7 +174,7 @@ The in-app **manual add** flow (`+` → enter URL). On `POST /items`, the popup 
 
 | Field | Behaviour |
 |---|---|
-| Name | Editable, pre-filled with the returned `title` |
+| Name | Editable, pre-filled with the returned `title`. **Optional at Save** — when the create response has no title (origin blocked fast scraping), leaving it blank does not write `name`, so the worker's AI name fills in. Save is never gated on name. |
 | Source | Shown (platform icon), immutable |
 | Consume time | Shown when returned, immutable |
 | Tags | Optional, user-entered; AI tags merge in later |
@@ -390,7 +390,7 @@ flowchart LR
 
 ## 8. Technical decisions
 
-> Tech stack & infrastructure: see §8.9. In short — Supabase (Postgres + pgvector + Realtime + Storage + Auth), direct client + RLS for plain CRUD, and Python on AWS Lambda for the two smart endpoints and the worker.
+> Tech stack & infrastructure: see §8.9. In short — Supabase (Postgres + pgvector + Realtime + Storage + Auth), direct client + RLS for plain CRUD, and **Supabase Edge Functions (Deno/TS)** for the create endpoint and the worker. (v1 runtime decision, 2026-06-13: Edge, not Python/Lambda — see §8.9.)
 
 ### 8.1 Data model
 
@@ -596,7 +596,7 @@ Guiding constraint: **no users yet, slow scale → no ever-running infra, on-tri
 |---|---|---|
 | DB, Auth, Realtime, Storage | **Supabase** (free tier) | One platform; Postgres + pgvector + Realtime + Storage + Auth. RLS is the authz layer |
 | Plain CRUD (reads, edits, deletes, projects) | **Direct Supabase client + RLS** | No backend code or cost; JWT auto-attached, `user_id = auth.uid()` enforces ownership |
-| Smart endpoint (`POST /items`) + worker | **Python on AWS Lambda** | Python's fetch/scrape/LLM ecosystem; scale-to-zero, large perpetual free tier; holds the OpenAI + service-role secrets. (v1 has **one** app-facing Lambda — create; `reprocess` and `POST /search` are v2.) |
+| Smart endpoint (`POST /items`) + worker | **Supabase Edge Functions (Deno/TS)** — *v1* | Deployable/testable now via MCP, one platform, scale-to-zero, free tier 500k invocations/mo. v1 workloads (HTML/oEmbed/caption fetch) are I/O-bound and fit Edge limits (256 MB, 2s CPU, 150s/400s wall-clock, 20 MB bundle). v1 has **one** app-facing fn — create; `reprocess` and `POST /search` are v2. **v2 migration seam:** PDF text + first-page render is CPU/mem-heavy and needs native libs Edge bans (`sharp`/`libvips`) — when built, move the worker to **Python on Lambda/container** and repoint the pg_net trigger URL (no schema/client change). The §8.9 Python rationale below now applies to that v2 worker. |
 | Trigger (event → worker) | **Postgres trigger → pg_net** (async HTTP) | In-DB, no queue/poller; fires the Lambda without blocking the insert |
 | Watchdog + orphan sweep | **pg_cron** | In-DB periodic sweep; fails stuck `processing` / abandoned `awaiting_upload` rows |
 | Live updates (backend → app) | **Supabase Realtime** | Already chosen (§8.2); no polling |
@@ -701,7 +701,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 
 ## 10. Implementation status
 
-_Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-memory mock store** ([`src/store/shelf.tsx`](../../app/src/store/shelf.tsx)) with **real Supabase authentication**. No application data is persisted to a backend yet._
+_Snapshot: 2026-06-13. The mock store has been replaced by a **real Supabase data layer** (direct client + RLS, Realtime fill-in, reconcile GETs, session-gated). The v1 backend (`create-item` + `process-item` worker) is built as **Supabase Edge Functions** and deployed; the pg_net trigger + pg_cron watchdog are live. Pending user action: set the `GEMINI_API_KEY` + `WORKER_SECRET` function secrets and the Vault `worker_secret` to light up AI tagging end-to-end. Share extension, onboarding, pricing/IAP, and all v2 items remain pending._
 
 | Area | Status | Notes |
 |---|---|---|
@@ -713,24 +713,24 @@ _Snapshot: 2026-06-12. "Done" means the UI is built and working against an **in-
 | Calendar / date filter | ✅ Done | Marks days with items; day grid; clears on toggle |
 | Item detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
 | Add item / create / edit project | ✅ Done | Bottom-sheet flows on mock data |
-| Search screen (v1 keyword) | 🟡 Partial | Tag browser + live keyword results over name/tags/summary built — **this is the v1 mechanism** (no longer a stand-in); needs to point at real data. Semantic is v2 (§8.6) |
+| Search screen (v1 keyword) | ✅ Done | Tag browser + live keyword results over name/tags/summary, now over real loaded items. Semantic is v2 (§8.6) |
 | Reminder toggle | 🟡 Partial | UI toggle built; v1 only persists `reminder_enabled` — notification delivery is **v2** (§8.5) |
-| Card title rename + accent rule | ⛔ Pending | Frontend uses an AI `descriptor`/`title` split; DB model is single `name`. Collapse to `name`, and render its first two words in accent client-side (card + detail) (§8.1, §6.2, §6.4) |
+| Card title rename + accent rule | ✅ Done | `descriptor`/`title` collapsed to single `name`; `titleAccent(name)` renders first two words in accent client-side (card + detail) (§8.1, §6.2, §6.4) |
 | Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
 | Settings drawer | 🟡 Partial | Drawer + sections present; account/subscription/notifications are static |
-| Supabase schema + RLS | ⛔ Pending | `items` + `projects` tables, `user_id`-scoped RLS; direct-client CRUD wiring. Store mounts outside the auth gate ([_layout.tsx](../../app/src/store/shelf.tsx)) — must be gated on session + re-fetch on login |
-| Backend function (AWS Lambda, Python) | ⛔ Pending | v1: `POST /items` (create + enrichment), JWT verify (§8.7, §8.9). `reprocess` + `POST /search` are v2 |
-| Worker (AWS Lambda, Python) | ⛔ Pending | v1: `process` mode (no embedding); pg_net trigger; pg_cron watchdog; service-role writes. `reembed` mode is v2 (§8.9) |
-| Optimistic create + status lifecycle | ⛔ Pending | `status` enum, fast OG/oEmbed create response (§8.2) |
-| Realtime fill-in | ⛔ Pending | Supabase Realtime subscription on non-terminal items; reconcile GETs as the safety net, no polling (§8.2) |
-| Per-user dedup | ⛔ Pending | `unique (user_id, normalized_url)`; idempotent `POST /items`; URL normalisation (§8.3) |
-| AI tagging (name/summary/tags) | ⛔ Pending | Worker **Gemini 2.5 Flash-Lite** call not built; fields come from mock data (§8.5) |
-| Content parsing | ⛔ Pending | `processLink.ts` is a URL-pattern stub — no YouTube/Instagram/website fetch (§8.4) |
-| `raw_content` field | ⛔ Pending | Stored immutably in v1 as the v2-embedding base; not in the frontend model |
+| Supabase schema + RLS | ✅ Done | `items` + `projects` tables, `user_id`-scoped RLS (insert/select/update/delete), partial dedup index, `moddatetime` triggers, Realtime publication. Store now mounts inside the auth gate, session-gated + re-fetch on login |
+| Backend function (`create-item`, Edge/Deno) | ✅ Done | `POST /items` create + fast OG/oEmbed enrichment, JWT verify, idempotent dedup. Deployed, `verify_jwt=true`. (Was specced as Python/Lambda — now Edge, §8.9.) `reprocess`/`POST /search` are v2 |
+| Worker (`process-item`, Edge/Deno) | 🟡 Built, needs secret | `process` mode: content fetch + Gemini structured call + guarded terminal write. Deployed `verify_jwt=false`, fired by pg_net trigger; pg_cron watchdog live. Needs `GEMINI_API_KEY` + `WORKER_SECRET`/Vault secret set to run AI |
+| Optimistic create + status lifecycle | ✅ Done | `status` enum live; create returns at `processing` with non-AI fields; watchdog bounds it (§8.2) |
+| Realtime fill-in | ✅ Done | Realtime channel on `items`/`projects`; reconcile GETs on session/foreground/re-subscribe, no polling (§8.2) |
+| Per-user dedup | ✅ Done | partial `unique (user_id, normalized_url)`; idempotent create returns `{deduped}`; conservative normalisation (§8.3) |
+| AI tagging (name/summary/tags) | 🟡 Built, needs key | Worker Gemini 2.5 Flash-Lite structured call built; activates once `GEMINI_API_KEY` is set (§8.5) |
+| Content parsing | ✅ Done | YouTube (oEmbed + transcript/length scrape), Instagram (OG caption), website (OG + full-text word-count) in the Edge fns (§8.4) |
+| `raw_content` field | ✅ Done | Column live; worker writes it immutably as the v2-embedding base |
 | Semantic search + embeddings (v2) | ⛔ v2 | pgvector, `text-embedding-3-small`, `POST /search`, `reembed` (§8.6) |
 | Failure retry / `reprocess` (v2) | ⛔ v2 | v1 failed → Remove; reprocess endpoint + Try-again deferred (§8.2) |
 | Reminder delivery (v2) | ⛔ v2 | v1 stores toggle only; scheduling/notification deferred (§8.5) |
-| `consume_time` field | 🟡 Partial | Frontend renamed `duration` → `consumeTime`; badge hidden when blank (§6.2) ✅. Still a mock-only `string` (e.g. `'12m'`) — convert to int seconds + client-side formatter and derive on backend (§8.4) ⛔ |
+| `consume_time` field | ✅ Done | Int seconds in DB; `formatConsumeTime()` renders the badge client-side, hidden when blank; derived on the backend (YouTube length / website word-count) (§8.4, §6.2) |
 | iOS share extension | ⛔ Pending | In-place sheet (URL + optional project) → `POST /items` via App Group JWT → backend async processing (§6.10, §8.5) |
 | Push notification reminders | ⛔ Pending | No `expo-notifications` integration |
 | Onboarding screens | ⛔ Pending | Only Login exists — no welcome / feature / notification-permission screens |

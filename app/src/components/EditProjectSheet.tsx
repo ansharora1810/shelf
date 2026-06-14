@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { Alert, Keyboard, Pressable, StyleSheet, Text } from 'react-native'
 import {
   BottomSheetBackdrop,
@@ -25,14 +25,19 @@ export const EditProjectSheet = forwardRef<
   useImperativeHandle(ref, () => sheetRef.current as BottomSheetModal)
 
   const { upsertProject, deleteProject } = useShelf()
-  const openedRef = useRef(false)
   const [name, setName] = useState('')
+
+  // Prefill from the project being edited. Keyed on id so it tracks switching
+  // projects but doesn't clobber the user's keystrokes on every re-render.
+  useEffect(() => {
+    setName(project?.name ?? '')
+  }, [project?.id])
 
   const trimmed = name.trim()
 
   const save = () => {
     if (!trimmed || !project) return
-    upsertProject({ id: project.id, name: toTitleCase(trimmed) })
+    void upsertProject({ id: project.id, name: toTitleCase(trimmed) })
     Keyboard.dismiss()
     sheetRef.current?.dismiss()
   }
@@ -45,7 +50,7 @@ export const EditProjectSheet = forwardRef<
         text: 'Delete',
         style: 'destructive',
         onPress: () => {
-          deleteProject(project.id)
+          void deleteProject(project.id, false)
           sheetRef.current?.dismiss()
           onDeleted()
         },
@@ -69,15 +74,7 @@ export const EditProjectSheet = forwardRef<
       backdropComponent={renderBackdrop}
       handleIndicatorStyle={styles.handle}
       backgroundStyle={styles.sheetBg}
-      onChange={index => {
-        if (index >= 0 && !openedRef.current) {
-          openedRef.current = true
-          setName(project?.name ?? '')
-        }
-      }}
-      onDismiss={() => {
-        openedRef.current = false
-      }}
+      onDismiss={() => setName(project?.name ?? '')}
     >
       <BottomSheetView style={styles.content}>
         <Text style={styles.title}>Edit project</Text>

@@ -21,7 +21,11 @@ function RootNavigator() {
   }, [session, loading, pathname, router])
 
   if (loading) return null
-  return <Stack screenOptions={{ headerShown: false, animation: 'slide_from_right' }} />
+  return (
+    <ShelfProvider>
+      <Stack screenOptions={{ headerShown: false, animation: 'slide_from_right' }} />
+    </ShelfProvider>
+  )
 }
 
 export default function RootLayout() {
@@ -36,12 +40,10 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AuthProvider>
-        <ShelfProvider>
-          <BottomSheetModalProvider>
-            <StatusBar style="dark" />
-            <RootNavigator />
-          </BottomSheetModalProvider>
-        </ShelfProvider>
+        <BottomSheetModalProvider>
+          <StatusBar style="dark" />
+          <RootNavigator />
+        </BottomSheetModalProvider>
       </AuthProvider>
     </GestureHandlerRootView>
   )

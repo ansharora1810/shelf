@@ -1,0 +1,7 @@
+project_id = "hpnxuouiyrhlqabkgmis"
+
+[functions.create-item]
+verify_jwt = true
+
+[functions.process-item]
+verify_jwt = false

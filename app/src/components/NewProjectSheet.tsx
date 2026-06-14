@@ -27,7 +27,7 @@ export const NewProjectSheet = forwardRef<BottomSheetModal>((_props, ref) => {
 
   const create = () => {
     if (!trimmed) return
-    upsertProject({ name: toTitleCase(trimmed) })
+    void upsertProject({ name: toTitleCase(trimmed) })
     Keyboard.dismiss()
     sheetRef.current?.dismiss()
   }

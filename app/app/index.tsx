@@ -17,10 +17,12 @@ import { Image } from 'expo-image'
 import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
 import type { BottomSheetModal } from '@gorhom/bottom-sheet'
-import { mockLinks, getTopTags, groupLinksByWeek } from '../src/data/mock'
+import { getTopTags, groupLinksByWeek } from '../src/data/feed'
 import { useShelf } from '../src/store/shelf'
 import { Link, Project } from '../src/types'
+import { titleAccent, formatConsumeTime } from '../src/data/title'
 import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
+import { Thumbnail } from '../src/components/Thumbnail'
 import { SpeedDialFab } from '../src/components/SpeedDialFab'
 import { NewProjectSheet } from '../src/components/NewProjectSheet'
 import { NewLinkSheet } from '../src/components/NewLinkSheet'
@@ -37,14 +39,15 @@ const DATE_CARD_WIDTH = CARD_WIDTH
 const PROJECT_CARD_WIDTH = Math.floor((SCREEN_WIDTH - Spacing.screenH * 2 - 16) / 2)
 const PROJECT_THUMB_SIZE = Math.floor(PROJECT_CARD_WIDTH / 2)
 
-const topTags = getTopTags(mockLinks, 5)
-
 type Tab = { key: string; label: string }
-const TABS: Tab[] = [
-  { key: 'all', label: '#ALL' },
-  { key: 'projects', label: 'PROJECTS' },
-  ...topTags.map(tag => ({ key: tag, label: tag.toUpperCase() })),
-]
+
+function buildTabs(links: Link[]): Tab[] {
+  return [
+    { key: 'all', label: '#ALL' },
+    { key: 'projects', label: 'PROJECTS' },
+    ...getTopTags(links, 5).map(tag => ({ key: tag, label: tag.toUpperCase() })),
+  ]
+}
 
 type ActiveView = { type: 'tag'; key: string } | { type: 'project'; projectId: string }
 
@@ -109,7 +112,7 @@ function Header({
   )
 }
 
-function TabBar({ activeKey, onSelect }: { activeKey: string; onSelect: (key: string) => void }) {
+function TabBar({ tabs, activeKey, onSelect }: { tabs: Tab[]; activeKey: string; onSelect: (key: string) => void }) {
   return (
     <ScrollView
       horizontal
@@ -117,7 +120,7 @@ function TabBar({ activeKey, onSelect }: { activeKey: string; onSelect: (key: st
       style={styles.tabBarScroll}
       contentContainerStyle={styles.tabBarContent}
     >
-      {TABS.map(tab => {
+      {tabs.map(tab => {
         const active = tab.key === activeKey
         return (
           <Pressable key={tab.key} onPress={() => onSelect(tab.key)} style={styles.tabItem}>
@@ -130,31 +133,35 @@ function TabBar({ activeKey, onSelect }: { activeKey: string; onSelect: (key: st
   )
 }
 
-function ConsumeTimeBadge({ consumeTime }: { consumeTime: string }) {
+function ConsumeTimeBadge({ seconds }: { seconds: number }) {
   return (
     <View style={styles.badge}>
       <Ionicons name="time-outline" size={10} color={Colors.accent} />
-      <Text style={styles.badgeText}>{consumeTime}</Text>
+      <Text style={styles.badgeText}>{formatConsumeTime(seconds)}</Text>
     </View>
   )
 }
 
 function LinkCard({ link, width = CARD_WIDTH }: { link: Link; width?: number }) {
   const router = useRouter()
+  const { accent, rest } = titleAccent(link.name)
   return (
     <Pressable style={{ width }} onPress={() => router.push(`/link/${link.id}`)}>
       <View style={styles.cardImageWrap}>
-        <Image
-          source={{ uri: link.thumbnail }}
-          style={[styles.cardImage, { width, height: width }]}
-          contentFit="cover"
-          transition={200}
+        <Thumbnail
+          uri={link.thumbnail}
+          source={link.source}
+          name={link.name}
+          width={width}
+          height={width}
+          radius={Radius.card}
+          iconSize={Math.round(width * 0.3)}
         />
-        {link.consumeTime ? <ConsumeTimeBadge consumeTime={link.consumeTime} /> : null}
+        {link.consumeTime ? <ConsumeTimeBadge seconds={link.consumeTime} /> : null}
       </View>
       <Text style={styles.cardTitle} numberOfLines={3}>
-        {link.descriptor ? <Text style={styles.cardDescriptor}>{link.descriptor} </Text> : null}
-        <Text style={styles.cardTitleMain}>{link.title}</Text>
+        {accent ? <Text style={styles.cardDescriptor}>{accent} </Text> : null}
+        <Text style={styles.cardTitleMain}>{rest}</Text>
       </Text>
     </Pressable>
   )
@@ -226,7 +233,7 @@ function DateGrid({ date, links }: { date: string; links: Link[] }) {
 function ProjectCollage({ project, onPress }: { project: Project; onPress: () => void }) {
   const { getLinksForProject } = useShelf()
   const links = getLinksForProject(project.id)
-  const thumbnails = links.slice(0, 4).map(l => l.thumbnail)
+  const thumbnails = links.map(l => l.thumbnail).filter(Boolean).slice(0, 4)
   const size = PROJECT_CARD_WIDTH
   const half = PROJECT_THUMB_SIZE
   const count = thumbnails.length
@@ -272,7 +279,7 @@ function ProjectCollage({ project, onPress }: { project: Project; onPress: () =>
         {renderInner()}
       </View>
       <Text style={styles.projectName}>{project.name}</Text>
-      <Text style={styles.projectCount}>{project.linkCount} saved</Text>
+      <Text style={styles.projectCount}>{links.length} saved</Text>
     </Pressable>
   )
 }
@@ -315,9 +322,9 @@ function linksForView(
   return allLinks.filter(l => l.tags.includes(view.key))
 }
 
-function viewOrder(view: ActiveView): number {
-  if (view.type === 'project') return TABS.findIndex(t => t.key === 'projects') + 0.5
-  return TABS.findIndex(t => t.key === view.key)
+function viewOrder(view: ActiveView, tabs: Tab[]): number {
+  if (view.type === 'project') return tabs.findIndex(t => t.key === 'projects') + 0.5
+  return tabs.findIndex(t => t.key === view.key)
 }
 
 function viewKey(view: ActiveView): string {
@@ -330,6 +337,7 @@ export default function HomeScreen() {
   const [activeView, setActiveView] = useState<ActiveView>({ type: 'tag', key: 'all' })
   const router = useRouter()
   const { links, projects, getLinksForProject } = useShelf()
+  const tabs = useMemo(() => buildTabs(links), [links])
   const newProjectRef = useRef<BottomSheetModal>(null)
   const newLinkRef = useRef<BottomSheetModal>(null)
   const editProjectRef = useRef<BottomSheetModal>(null)
@@ -355,7 +363,7 @@ export default function HomeScreen() {
 
   function navigate(newView: ActiveView) {
     if (viewKey(newView) === viewKey(activeView)) return
-    exitDir.value = viewOrder(newView) >= viewOrder(activeView) ? 1 : -1
+    exitDir.value = viewOrder(newView, tabs) >= viewOrder(activeView, tabs) ? 1 : -1
     setActiveView(newView)
   }
 
@@ -414,7 +422,7 @@ export default function HomeScreen() {
         showCalendar={showCalendar}
         dateActive={activeDate !== null}
       />
-      <TabBar activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
+      <TabBar tabs={tabs} activeKey={activeTabKey} onSelect={key => navigate({ type: 'tag', key })} />
       <View style={styles.bodyContainer}>
         <Animated.View
           key={viewKey(activeView)}
