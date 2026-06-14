@@ -2,14 +2,9 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { normalizeUrl } from "../_shared/url.ts";
 import { classifySource } from "../_shared/source.ts";
-import { resolveFinalUrl, getParser } from "../_shared/parsers/index.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-
-// Title/thumbnail fetch budget. Follows redirects (e.g. tinyurl → destination),
-// so it needs headroom for two hops; the popup shows a name skeleton meanwhile.
-const ENRICH_TIMEOUT_MS = 8_000;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return handleOptions();
@@ -65,27 +60,12 @@ Deno.serve(async (req) => {
   }
 
   // -------------------------------------------------------------------------
-  // Fast enrichment (non-AI, under tight timeout).
-  // We race the enrichment against the timeout; on timeout we proceed with
-  // whatever resolved — a slow origin is not an error.
-  // -------------------------------------------------------------------------
-  let source = classifySource(normalizedUrl); // fallback host if resolution fails
-  let title: string | null = null;
-  let thumbnailUrl: string | null = null;
-
-  try {
-    const enriched = await withTimeout(enrich(normalizedUrl), ENRICH_TIMEOUT_MS);
-    source = enriched.source;
-    title = enriched.title;
-    thumbnailUrl = enriched.thumbnailUrl;
-  } catch {
-    // Timeout or fetch error — proceed with the fallback source and null fields.
-  }
-
-  
-
-  // -------------------------------------------------------------------------
-  // Insert the row. Uses caller JWT → RLS sets user_id = auth.uid().
+  // Insert the row at `processing` and return immediately. All enrichment
+  // (title, thumbnail, resolved source, content, AI tags) is the worker's job,
+  // fired by the AFTER INSERT trigger — so this stays a sub-100ms DB op and the
+  // share sheet confirms instantly. `source` is a network-free best-effort from
+  // the normalized host; the worker corrects it after resolving redirects.
+  // Uses caller JWT → RLS sets user_id = auth.uid().
   // -------------------------------------------------------------------------
   const { data: item, error: insertError } = await supabase
     .from("items")
@@ -93,9 +73,7 @@ Deno.serve(async (req) => {
       type: "link",
       url: rawUrl,
       normalized_url: normalizedUrl,
-      source,
-      name: title,
-      thumbnail_url: thumbnailUrl,
+      source: classifySource(normalizedUrl),
       project_id: body.project_id ?? null,
       status: "processing",
       processing_started_at: new Date().toISOString(),
@@ -114,29 +92,6 @@ Deno.serve(async (req) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// Resolve the redirect, classify on the *final* URL, then parse it. YouTube
-// (incl. shortened/redirected links) uses oEmbed — reliable from a datacenter
-// IP, unlike scraping the watch page (which hits a consent wall).
-async function enrich(
-  url: string
-): Promise<{ source: string; title: string | null; thumbnailUrl: string | null }> {
-  const finalUrl = await resolveFinalUrl(url, ENRICH_TIMEOUT_MS);
-  console.log("create-item enrich finalUrl:", finalUrl);
-  const source = classifySource(finalUrl);
-  const parsed = await getParser(source).fetchFast(finalUrl, ENRICH_TIMEOUT_MS);
-  return { source, ...parsed };
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), ms);
-    promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); }
-    );
-  });
-}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

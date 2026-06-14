@@ -1,4 +1,4 @@
-import { FastEnrichment, FullContent, Parser } from "./types.ts";
+import { FullContent, Parser } from "./types.ts";
 import { DEFAULT_USER_AGENT, fetchWithTimeout } from "./http.ts";
 
 const CONTENT_TIMEOUT_MS = 10_000;
@@ -9,29 +9,15 @@ interface CaptionTrack {
   languageCode: string;
 }
 
-// YouTube parser. The fast path uses oEmbed (reliable from a datacenter IP);
-// the content path scrapes the watch page for video length and a transcript,
-// falling back to the description when no captions exist.
+// YouTube parser. Scrapes the watch page for the title, video length, and a
+// transcript, falling back to the description when no captions exist. The
+// thumbnail is deterministic from the video id.
 export class YoutubeParser implements Parser {
-  async fetchFast(url: string, timeoutMs: number): Promise<FastEnrichment> {
-    const oembedUrl =
-      `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
-    const res = await fetchWithTimeout(oembedUrl, timeoutMs);
-    if (!res?.ok) return { title: null, thumbnailUrl: null };
-    try {
-      const json = await res.json();
-      return {
-        title: json.title ?? null,
-        thumbnailUrl: json.thumbnail_url ?? null,
-      };
-    } catch {
-      return { title: null, thumbnailUrl: null };
-    }
-  }
-
   async fetchContent(url: string): Promise<FullContent> {
     const videoId = this.extractVideoId(url);
-    if (!videoId) return { rawContent: null, consumeTime: null, thumbnailUrl: null };
+    if (!videoId) {
+      return { title: null, rawContent: null, consumeTime: null, thumbnailUrl: null };
+    }
 
     const pageHtml = await this.fetchWatchPage(videoId);
     const lengthSeconds = pageHtml ? this.extractLengthSeconds(pageHtml) : null;
@@ -41,11 +27,23 @@ export class YoutubeParser implements Parser {
       transcript ?? (pageHtml ? this.extractDescription(pageHtml) : null);
 
     return {
+      title: pageHtml ? this.extractTitle(pageHtml) : null,
       rawContent,
       consumeTime: lengthSeconds,
       // Deterministic from the video id — always available.
       thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
     };
+  }
+
+  private extractTitle(pageHtml: string): string | null {
+    const m = pageHtml.match(/<meta property="og:title" content="([^"]*)"/);
+    if (!m) return null;
+    return m[1]
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
   }
 
   private extractVideoId(url: string): string | null {

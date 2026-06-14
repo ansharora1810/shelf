@@ -88,13 +88,15 @@ async function processItem(
   const finalUrl = await resolveFinalUrl(url, 8_000);
   const source = classifySource(finalUrl);
 
-  // 3. Fetch full content.
+  // 3. Fetch full content: deterministic title + thumbnail + body.
+  let title: string | null = null;
   let rawContent: string | null = null;
   let consumeTime: number | null = null;
   let thumbnailUrl: string | null = null;
 
   try {
     const fetched = await getParser(source).fetchContent(finalUrl);
+    title = fetched.title;
     rawContent = fetched.rawContent;
     consumeTime = fetched.consumeTime;
     thumbnailUrl = fetched.thumbnailUrl;
@@ -116,7 +118,7 @@ async function processItem(
 
   // 6. Determine final status.
   // failed = nothing usable at all (no raw content, no title, no AI result).
-  const hasAnything = rawContent || item.name || aiResult;
+  const hasAnything = rawContent || item.name || title || aiResult;
   const finalStatus = hasAnything ? "ready" : "failed";
 
   // 7. Guarded terminal write — WHERE id = :itemId AND status = 'processing' so a
@@ -133,9 +135,11 @@ async function processItem(
       raw_content: rawContent,
       // summary is AI-owned and always written when available.
       summary: aiResult?.summary ?? null,
-      // name: only fill if the row has no name yet (coalesce(nullif(name,''), ai_name)).
-      name: item.name?.trim() ? item.name : (aiResult?.name ?? item.name),
-      // consume_time + thumbnail: coalesce — backfill only what create missed.
+      // name: keep a user-set name; else prefer the AI name, falling back to
+      // the deterministic title so a card is never blank when AI is absent.
+      name: item.name?.trim() ? item.name : (aiResult?.name ?? title),
+      // consume_time + thumbnail are worker-owned now; coalesce guards against
+      // a future create-time value.
       consume_time: item.consume_time ?? consumeTime,
       thumbnail_url: item.thumbnail_url ?? thumbnailUrl,
       updated_at: new Date().toISOString(),

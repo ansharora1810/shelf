@@ -4,7 +4,7 @@ import { WebsiteParser } from "./website.ts";
 import { YoutubeParser } from "./youtube.ts";
 import { InstagramParser } from "./instagram.ts";
 
-export type { FastEnrichment, FullContent, Parser } from "./types.ts";
+export type { FullContent, Parser } from "./types.ts";
 export { resolveFinalUrl } from "./http.ts";
 export { classifyInstagramUrl } from "./instagram.ts";
 export type { InstagramUrlKind } from "./instagram.ts";

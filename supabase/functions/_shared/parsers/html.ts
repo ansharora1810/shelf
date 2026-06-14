@@ -1,8 +1,12 @@
 import { DOMParser } from "jsr:@b-fuze/deno-dom";
-import { FastEnrichment } from "./types.ts";
+
+export interface Meta {
+  title: string | null;
+  thumbnailUrl: string | null;
+}
 
 // OG / Twitter card metadata — the title + thumbnail a page advertises to bots.
-export function parseMeta(html: string): FastEnrichment {
+export function parseMeta(html: string): Meta {
   const doc = new DOMParser().parseFromString(html, "text/html");
   if (!doc) return { title: null, thumbnailUrl: null };
 

@@ -1,4 +1,4 @@
-import { FastEnrichment, FullContent, Parser } from "./types.ts";
+import { FullContent, Parser } from "./types.ts";
 import { fetchWithTimeout } from "./http.ts";
 import { metaProperty, parseMeta } from "./html.ts";
 
@@ -66,22 +66,11 @@ export function classifyInstagramUrl(url: string): InstagramUrlKind {
 }
 
 export class InstagramParser implements Parser {
-  async fetchFast(url: string, timeoutMs: number): Promise<FastEnrichment> {
-    const media = await this.fetchGraphql(url, timeoutMs);
-    if (media) {
-      return {
-        title: this.captionToTitle(media.caption, media.ownerUsername),
-        thumbnailUrl: media.thumbnailUrl,
-      };
-    }
-    const html = await this.fetchHtml(url, timeoutMs);
-    return html ? parseMeta(html) : { title: null, thumbnailUrl: null };
-  }
-
   async fetchContent(url: string): Promise<FullContent> {
     const media = await this.fetchGraphql(url, CONTENT_TIMEOUT_MS);
     if (media) {
       return {
+        title: this.captionToTitle(media.caption, media.ownerUsername),
         rawContent: media.caption,
         consumeTime: media.isVideo ? media.videoDuration : null,
         thumbnailUrl: media.thumbnailUrl,
@@ -90,14 +79,15 @@ export class InstagramParser implements Parser {
 
     // No caption via GraphQL. For posts/reels this is an endpoint failure —
     // fall back to the OG description as a best-effort caption. Profiles,
-    // stories, and the feed have no caption: keep only the thumbnail.
+    // stories, and the feed have no caption: keep only title + thumbnail.
     const html = await this.fetchHtml(url, CONTENT_TIMEOUT_MS);
-    if (!html) return { rawContent: null, consumeTime: null, thumbnailUrl: null };
+    if (!html) return { title: null, rawContent: null, consumeTime: null, thumbnailUrl: null };
 
-    const { thumbnailUrl } = parseMeta(html);
+    const { title, thumbnailUrl } = parseMeta(html);
     const { kind } = parseUrl(url);
     const captioned = kind === "post" || kind === "reel";
     return {
+      title,
       rawContent: captioned ? metaProperty(html, "og:description") : null,
       consumeTime: null,
       thumbnailUrl,
