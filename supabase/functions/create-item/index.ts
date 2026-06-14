@@ -1,13 +1,8 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { normalizeUrl } from "../_shared/url.ts";
-import { classifySource, isYouTube, isInstagram } from "../_shared/source.ts";
-import {
-  resolveFinalUrl,
-  fetchWebsiteFast,
-  fetchYoutubeFast,
-  fetchInstagramFast,
-} from "../_shared/parse.ts";
+import { classifySource } from "../_shared/source.ts";
+import { resolveFinalUrl, getParser } from "../_shared/parsers/index.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -74,12 +69,12 @@ Deno.serve(async (req) => {
   // We race the enrichment against the timeout; on timeout we proceed with
   // whatever resolved — a slow origin is not an error.
   // -------------------------------------------------------------------------
-  let source = classifySource(rawUrl); // fallback host if resolution fails
+  let source = classifySource(normalizedUrl); // fallback host if resolution fails
   let title: string | null = null;
   let thumbnailUrl: string | null = null;
 
   try {
-    const enriched = await withTimeout(enrich(rawUrl), ENRICH_TIMEOUT_MS);
+    const enriched = await withTimeout(enrich(normalizedUrl), ENRICH_TIMEOUT_MS);
     source = enriched.source;
     title = enriched.title;
     thumbnailUrl = enriched.thumbnailUrl;
@@ -124,15 +119,12 @@ Deno.serve(async (req) => {
 // (incl. shortened/redirected links) uses oEmbed — reliable from a datacenter
 // IP, unlike scraping the watch page (which hits a consent wall).
 async function enrich(
-  rawUrl: string
+  url: string
 ): Promise<{ source: string; title: string | null; thumbnailUrl: string | null }> {
-  const finalUrl = await resolveFinalUrl(rawUrl, ENRICH_TIMEOUT_MS);
+  const finalUrl = await resolveFinalUrl(url, ENRICH_TIMEOUT_MS);
+  console.log("create-item enrich finalUrl:", finalUrl);
   const source = classifySource(finalUrl);
-  const parsed = isYouTube(source)
-    ? await fetchYoutubeFast(finalUrl, ENRICH_TIMEOUT_MS)
-    : isInstagram(source)
-    ? await fetchInstagramFast(finalUrl, ENRICH_TIMEOUT_MS)
-    : await fetchWebsiteFast(finalUrl, ENRICH_TIMEOUT_MS);
+  const parsed = await getParser(source).fetchFast(finalUrl, ENRICH_TIMEOUT_MS);
   return { source, ...parsed };
 }
 

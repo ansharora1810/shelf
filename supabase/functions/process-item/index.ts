@@ -1,12 +1,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
-import { classifySource, isYouTube, isInstagram } from "../_shared/source.ts";
-import {
-  resolveFinalUrl,
-  fetchWebsiteContent,
-  fetchYoutubeContent,
-  fetchInstagramContent,
-} from "../_shared/parse.ts";
+import { classifySource } from "../_shared/source.ts";
+import { resolveFinalUrl, getParser } from "../_shared/parsers/index.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -87,7 +82,9 @@ async function processItem(
 
   // Resolve the redirect and classify on the destination — a shortened link to
   // YouTube/Instagram must be parsed as such, not as a generic website.
-  const url: string = item.url ?? "";
+  // Prefer the canonical (scheme-bearing) URL so redirect resolution and the
+  // parsers' own fetches operate on an absolute URL.
+  const url: string = item.normalized_url ?? item.url ?? "";
   const finalUrl = await resolveFinalUrl(url, 8_000);
   const source = classifySource(finalUrl);
 
@@ -97,7 +94,7 @@ async function processItem(
   let thumbnailUrl: string | null = null;
 
   try {
-    const fetched = await fetchContent(source, finalUrl);
+    const fetched = await getParser(source).fetchContent(finalUrl);
     rawContent = fetched.rawContent;
     consumeTime = fetched.consumeTime;
     thumbnailUrl = fetched.thumbnailUrl;
@@ -159,19 +156,6 @@ async function processItem(
     const { error: tagError } = await supabase.rpc("add_item_tags", { p_id: itemId, p_tags: aiTags });
     if (tagError) console.error(`process-item: tag merge failed for ${itemId}:`, tagError);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Content dispatch
-// ---------------------------------------------------------------------------
-
-async function fetchContent(
-  source: string,
-  url: string
-): Promise<{ rawContent: string | null; consumeTime: number | null; thumbnailUrl: string | null }> {
-  if (isYouTube(source)) return fetchYoutubeContent(url);
-  if (isInstagram(source)) return fetchInstagramContent(url);
-  return fetchWebsiteContent(url);
 }
 
 // ---------------------------------------------------------------------------
