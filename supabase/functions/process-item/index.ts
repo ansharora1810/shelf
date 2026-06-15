@@ -111,20 +111,25 @@ async function processItem(
   //    video whose transcript couldn't be fetched).
   const promptContext = buildPromptContext(item.name?.trim() ? item.name : title, rawContent, url);
 
-  // 5. One Gemini call for structured output.
+  // 5. Fetch the user's existing tag vocabulary. Passing it to the model and
+  //    biasing toward reuse is what keeps tags from fragmenting into synonyms
+  //    (#ml vs #machine-learning) — the only way a tag groups items at all.
+  const existingTags = await fetchUserTags(supabase, item.user_id as string, itemId);
+
+  // 6. One Gemini call for structured output.
   let aiResult: GeminiResult | null = null;
   try {
-    aiResult = await callGemini(promptContext);
+    aiResult = await callGemini(promptContext, existingTags);
   } catch (err) {
     console.error(`process-item: Gemini call failed for ${itemId}:`, err);
   }
 
-  // 6. Determine final status.
+  // 7. Determine final status.
   // failed = nothing usable at all (no raw content, no title, no AI result).
   const hasAnything = rawContent || item.name || title || aiResult;
   const finalStatus = hasAnything ? "ready" : "failed";
 
-  // 7. Guarded terminal write — WHERE id = :itemId AND status = 'processing' so a
+  // 8. Guarded terminal write — WHERE id = :itemId AND status = 'processing' so a
   //    watchdog that already failed the row wins and we no-op. Tags are NOT written
   //    here: they're appended atomically below so a concurrent manual-add tag merge
   //    can't be clobbered by a stale read-modify-write.
@@ -156,7 +161,7 @@ async function processItem(
     return;
   }
 
-  // 8. Append AI tags atomically (tags || new), only if we won the terminal write.
+  // 9. Append AI tags atomically (tags || new), only if we won the terminal write.
   //    Same path as the manual-add Save — both writers append, neither replaces.
   const aiTags = aiResult?.tags ?? [];
   if (written && written.length > 0 && aiTags.length > 0) {
@@ -187,21 +192,35 @@ function buildPromptContext(
 }
 
 // Flash-Lite occasionally returns a valid summary but an empty/absent tags
-// array despite the schema. Retry a few times until tags arrive (cheap, async).
-async function callGemini(context: string): Promise<GeminiResult> {
+// array despite the schema, and the free tier rate-limits bursts. Retry with
+// escalating backoff so three rapid calls don't trip the per-minute cap, and
+// swallow a per-attempt failure (e.g. a 429) so the loop still gets its tries.
+async function callGemini(context: string, existingTags: string[]): Promise<GeminiResult> {
   let last: GeminiResult = { name: "", summary: "", tags: [] };
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = await callGeminiOnce(context);
-    if (result.tags.length > 0) return result;
-    last = result;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 4_000 * attempt));
+    try {
+      const result = await callGeminiOnce(context, existingTags);
+      if (result.tags.length > 0) return result;
+      last = result;
+    } catch (err) {
+      console.error("process-item: Gemini attempt failed, will retry:", err);
+    }
   }
   return last;
 }
 
-async function callGeminiOnce(context: string): Promise<GeminiResult> {
+async function callGeminiOnce(context: string, existingTags: string[]): Promise<GeminiResult> {
+  // The whole existing vocabulary goes in-context (v1). At scale this becomes a
+  // semantic top-K retrieval (pgvector) so the relevant tags surface regardless
+  // of how large the library grows — see PRD §8.5 / §8.6.
+  const vocabulary = existingTags.length > 0
+    ? `\n\nExisting tags in this user's library — reuse one of these whenever it fits the content, and mint a new tag only when none of them apply:\n${existingTags.join(", ")}\n`
+    : "";
+
   const prompt = `You are a content librarian. Produce a structured JSON response using ONLY the fields provided below.
 
-${context}
+${context}${vocabulary}
 
 Grounding rules — do not violate:
 - Rely only on the fields given. Never invent facts, topics, or details that are not present.
@@ -210,7 +229,7 @@ Grounding rules — do not violate:
 Output rules:
 - name: a concise, descriptive title (max 80 characters)
 - summary: 1-3 sentence summary of what this content is about; keep it general when the only signal is the URL
-- tags: exactly 10 tags, each kebab-case with a leading #, e.g. #deep-work. Be specific when Title/Content are present; otherwise derive them from the URL and domain.`;
+- tags: always output 3 to 6 tags (never zero, never fewer than 3), each kebab-case with a leading #, e.g. #deep-work. Choose broad, reusable topic tags that other items could also share — avoid one-off phrases unique to this single item. Reuse an existing library tag above when one genuinely fits; otherwise create a fitting new tag. Even when only a title or URL is available, still produce 3 to 6 sensible tags.`;
 
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -224,8 +243,8 @@ Output rules:
           tags: {
             type: "array",
             items: { type: "string" },
-            minItems: 10,
-            maxItems: 10,
+            minItems: 3,
+            maxItems: 6,
           },
         },
         required: ["name", "summary", "tags"],
@@ -265,12 +284,30 @@ function normalizeAiTags(tags: unknown[]): string[] {
       // Enforce kebab-case: lowercase, replace spaces/underscores with hyphens.
       return slug.toLowerCase().replace(/[\s_]+/g, "-");
     })
-    .slice(0, 10);
+    .slice(0, 6);
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// The user's distinct tag vocabulary (excluding this item's own tags), so the
+// model can reuse it. A failure here degrades to no-vocabulary, not a throw.
+async function fetchUserTags(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  excludeId: string
+): Promise<string[]> {
+  const { data, error } = await supabase.rpc("get_user_tags", {
+    p_user_id: userId,
+    p_exclude_id: excludeId,
+  });
+  if (error) {
+    console.error(`process-item: get_user_tags failed for ${userId}:`, error);
+    return [];
+  }
+  return Array.isArray(data) ? data.filter((t): t is string => typeof t === "string") : [];
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
