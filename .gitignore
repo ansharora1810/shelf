@@ -1,1 +1,7 @@
 .DS_Store
+
+# Supabase CLI local state
+supabase/.temp/
+
+# Stray root lockfile — real lockfiles live in app/ and screens/
+/package-lock.json
