@@ -292,7 +292,7 @@ Opens a bottom sheet (same pattern as create project):
 
 ### 6.10 Share extension sheet
 
-The iOS share extension is how items enter Shelf from other apps (Safari, TikTok, Instagram, YouTube, etc.). It runs in a **separate sandboxed process** from the main app and stays in-place over the host app — it never launches the main app (Pattern A).
+The iOS share extension is how items enter Shelf from other apps (Safari, TikTok, Instagram, YouTube, etc.). It runs in a **separate sandboxed process** from the main app and stays in-place over the host app — it never launches the main app (Pattern A). (Exception: the `handover` transport for free-account on-device builds, which opens the app to save — see §8.10.)
 
 **Behaviour:**
 - User taps Shelf in the iOS share sheet → compact sheet appears over the host app
@@ -619,6 +619,28 @@ Guiding constraint: **no users yet, slow scale → no ever-running infra, on-tri
 
 ---
 
+### 8.10 Share transport: App Group (ship) vs device handover (free-account builds)
+
+**Problem.** The share extension's independent Supabase call (§8.5) depends on the **App Group** shared container. App Groups are free on the iOS **simulator** but require a **paid** Apple Developer account to provision on a **physical device** — a free "Personal Team" build that carries the App Group entitlement fails code-signing and can't even install on-device.
+
+**Two transports, one build-time switch.** A single env var, `EXPO_PUBLIC_SHARE_TRANSPORT` (`app-group` default | `handover`), selects the transport and drives both the native entitlements and the runtime behaviour from one source of truth.
+
+| Transport | When | Extension behaviour | App behaviour |
+|---|---|---|---|
+| `app-group` (**default — ships, and the simulator**) | Paid account / simulator | Reads the shared session, picks project, calls `create-item` directly, dismisses in place (§8.5). No app switch. | — |
+| `handover` | Free-account on-device personal builds | No shared container → no session. Shows the URL + **"Open Shelf to save"**, which opens the host app via the `shelf://` scheme carrying the URL. | Receives the deep link; **the main app** saves it via `create-item` using its own session. |
+
+**Why a build flag, not runtime simulator-detection.** Runtime detection (`isDevice`) can't ship correctly — the production build runs *on a device* yet must use App Groups. And the entitlement must be **absent at build time** for free-account signing to succeed; a runtime check can't remove a baked-in entitlement. The real axis is "is the App Group capability provisioned in this build," which is inherently build-time.
+
+**Mechanics.**
+- `app.config.js` reads the env var. In `handover` it drops the App Group entitlement + `AppGroup` Info.plist keys and inserts a `withoutAppGroups` config plugin that strips the App Group from **both** targets after `expo-share-extension` (which otherwise re-adds it unconditionally to app + extension).
+- The same env var is inlined (`EXPO_PUBLIC_`) into both the app and extension JS bundles. `src/share/transport.ts` is the single runtime switch: the extension entry renders one of two flows, and the app mounts the handover deep-link intake only in `handover` mode.
+- **Default is `app-group`**, so the simulator dev loop and the shipped build are unchanged and need zero config. Only free-account device builds set `EXPO_PUBLIC_SHARE_TRANSPORT=handover` before `expo prebuild` / `run:ios`.
+
+**Handover trade-off.** No in-extension project picker (the extension has no session to list projects); the item lands in **no project** and the user re-files it in-app. This path exists only for on-device testing without a paid account — the shipping experience is the in-place App Group flow.
+
+---
+
 ## 9. Decision log
 
 Settled decisions and the reasoning behind them. Detail lives in the sections referenced; this is the quick-scan index.
@@ -681,6 +703,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Reminder: **v1 stores the toggle** (`reminder_enabled`); scheduling/delivery (local vs push) is **v2** | Ship the field now; defer notification plumbing | §5, §8.5 |
 | Project delete asks **delete items vs orphan** (`delete_items` flag on `DELETE /projects/:id`) | User decides; FK behaviour follows the flag (delete or set-null) | §6.9, §8.7 |
 | Share extension self-refreshes its JWT via the App Group refresh token if the access token is stale | The extension doesn't run the main app's auto-refresh loop; the access token may be >1h old | §6.10, §8.9 |
+| Share transport is a **build-time switch** (`EXPO_PUBLIC_SHARE_TRANSPORT`): `app-group` (default, ships + simulator) vs `handover` (free-account device builds open the app to save). Not runtime simulator-detection | Free Personal Teams can't sign App Group entitlements; shipping runs on-device yet needs App Groups — so the axis is build-time, and one env var drives both entitlements and runtime behaviour | §8.10 |
 | Two tables (`items`, `projects`), both `user_id`-scoped (RLS); `linkCount`/membership derived client-side, not stored | Minimal schema; counts can't drift from the item list | §8.1 |
 | Stack: Supabase (DB/Auth/Realtime/Storage, free tier) + direct-client/RLS for CRUD + Python on AWS Lambda for the smart endpoint(s) & worker | No-users / slow-scale: scale-to-zero, on-trigger cost, free tier; Python for the fetch/scrape/LLM ecosystem | §8.9 |
 | v1 backend = **one** Lambda (`POST /items` create) + worker; everything else is direct-to-Supabase + RLS. `reprocess` and `POST /search` are v2 | Server code only where there's an outbound fetch, a secret, or a lifecycle transition; minimal surface | §8.7, §8.9 |

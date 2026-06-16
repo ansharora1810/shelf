@@ -1,9 +1,29 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from 'react'
 import { AppState } from 'react-native'
+import * as Linking from 'expo-linking'
 import { Link, Project, Source } from '../types'
 import { supabase } from '../lib/supabase'
 import { ItemRow, ItemStatus, ProjectRow } from '../lib/database.types'
+import { isHandover } from '../share/transport'
 import { useAuth } from './auth'
+
+// Pull the shared URL out of a handover deep link (PRD §8.10). openHostApp's
+// native URL builder drops the `?` (so the value lands on the path, not as a
+// query) and re-encodes it several times, so match `url=` directly and decode
+// until it's an http(s) URL — a fully-decoded shared link always is.
+function parseSharedUrl(deepLink: string): string | null {
+  const match = deepLink.match(/url=(.+)$/i)
+  if (!match) return null
+  let out = match[1]
+  for (let i = 0; i < 5 && !/^https?:\/\//i.test(out); i += 1) {
+    try {
+      out = decodeURIComponent(out)
+    } catch {
+      break
+    }
+  }
+  return /^https?:\/\//i.test(out) ? out : null
+}
 
 function mapItem(row: ItemRow): Link {
   return {
@@ -146,6 +166,41 @@ export function ShelfProvider({ children }: { children: ReactNode }) {
     setLinks(prev => upsertById(prev, item))
     return { item, deduped: Boolean(data.deduped) }
   }, [])
+
+  // Handover transport (PRD §8.10): the share extension opens the app with the
+  // shared URL on builds where it can't authenticate itself. Save it here, once
+  // a session exists — holding it across login if the user isn't signed in yet.
+  const pendingShareRef = useRef<string | null>(null)
+
+  const flushPendingShare = useCallback(() => {
+    const url = pendingShareRef.current
+    if (!url || !userId) return
+    pendingShareRef.current = null
+    createItem(url, null).catch(() => {
+      pendingShareRef.current = url
+    })
+  }, [userId, createItem])
+
+  // Keep the link subscription mounted once; flush below reacts to sign-in.
+  const flushRef = useRef(flushPendingShare)
+  flushRef.current = flushPendingShare
+
+  useEffect(() => {
+    if (!isHandover) return
+    const onLink = (deepLink: string | null) => {
+      const url = deepLink ? parseSharedUrl(deepLink) : null
+      if (!url) return
+      pendingShareRef.current = url
+      flushRef.current()
+    }
+    void Linking.getInitialURL().then(onLink)
+    const sub = Linking.addEventListener('url', e => onLink(e.url))
+    return () => sub.remove()
+  }, [])
+
+  useEffect(() => {
+    flushPendingShare()
+  }, [flushPendingShare])
 
   const updateItem = useCallback(async (id: string, edit: ItemEdit): Promise<void> => {
     const patch: Partial<ItemRow> = {}

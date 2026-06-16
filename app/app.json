@@ -12,7 +12,7 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.shelf.app",
+      "bundleIdentifier": "com.ansharora.shelf",
       "infoPlist": {
         "AppGroup": "group.com.shelf.app",
         "AppGroupIdentifier": "group.com.shelf.app"

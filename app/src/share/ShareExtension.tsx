@@ -9,9 +9,10 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { Ionicons } from '@expo/vector-icons'
-import { close } from 'expo-share-extension'
+import { close, openHostApp } from 'expo-share-extension'
 import { supabase } from '../lib/supabase'
 import { Colors } from '../constants/tokens'
+import { buildHandoverPath, isHandover } from './transport'
 
 type InitialProps = { url?: string; text?: string }
 type Phase = 'loading' | 'ready' | 'saving' | 'done' | 'error' | 'no-auth'
@@ -46,7 +47,13 @@ async function ensureSession() {
   return session
 }
 
+// Single switch (PRD §8.10): the App Group flow saves in place; the handover
+// flow opens the app to save on builds where App Groups aren't provisioned.
 export function ShareExtension(props: InitialProps) {
+  return isHandover ? <HandoverShare {...props} /> : <AppGroupShare {...props} />
+}
+
+function AppGroupShare(props: InitialProps) {
   const url = resolveUrl(props)
   const [phase, setPhase] = useState<Phase>('loading')
   const [projects, setProjects] = useState<Project[]>([])
@@ -170,6 +177,50 @@ export function ShareExtension(props: InitialProps) {
       )}
 
       {phase === 'done' && <SavedCheck />}
+    </View>
+  )
+}
+
+// Handover flow: no shared session to authenticate with, so hand the URL to
+// the app via the `shelf://` scheme and let it save (PRD §8.10). openHostApp
+// dismisses the extension once the app opens.
+function HandoverShare(props: InitialProps) {
+  const url = resolveUrl(props)
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Save to Shelf</Text>
+        <Pressable hitSlop={12} onPress={close}>
+          <Ionicons name="close" size={22} color={Colors.textSecondary} />
+        </Pressable>
+      </View>
+
+      {url ? (
+        <>
+          <View style={styles.preview}>
+            <View style={styles.previewIcon}>
+              <Ionicons name="link" size={16} color={Colors.primary} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.previewHost}>{hostOf(url)}</Text>
+              <Text style={styles.previewUrl} numberOfLines={1}>
+                {url}
+              </Text>
+            </View>
+          </View>
+          <Pressable style={styles.button} onPress={() => openHostApp(buildHandoverPath(url))}>
+            <Text style={styles.buttonText}>Open Shelf to save</Text>
+          </Pressable>
+        </>
+      ) : (
+        <View style={styles.center}>
+          <Text style={styles.message}>No link found to save.</Text>
+          <Pressable style={styles.button} onPress={close}>
+            <Text style={styles.buttonText}>Close</Text>
+          </Pressable>
+        </View>
+      )}
     </View>
   )
 }
