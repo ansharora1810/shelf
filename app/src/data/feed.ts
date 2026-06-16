@@ -13,7 +13,7 @@ export function getTopTags(links: Link[], count: number): string[] {
     .map(([tag]) => tag)
 }
 
-export function groupLinksByWeek(
+export function groupLinksByPeriod(
   links: Link[],
 ): Array<{ label: string; count: number; links: Link[] }> {
   const sorted = [...links].sort(
@@ -22,7 +22,7 @@ export function groupLinksByWeek(
 
   const groups = new Map<string, Link[]>()
   for (const link of sorted) {
-    const label = weekLabel(link.savedAt)
+    const label = periodLabel(link.savedAt)
     if (!groups.has(label)) groups.set(label, [])
     groups.get(label)!.push(link)
   }
@@ -34,12 +34,18 @@ export function groupLinksByWeek(
   }))
 }
 
-function weekLabel(dateStr: string): string {
+function periodLabel(dateStr: string): string {
   const date = new Date(dateStr)
   const now = new Date()
-  const diffDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24))
-  if (diffDays < 7) return 'This week'
-  if (diffDays < 14) return 'Last week'
-  const weeks = Math.floor(diffDays / 7)
+
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const dateStart = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const diffDays = Math.round((todayStart.getTime() - dateStart.getTime()) / (1000 * 60 * 60 * 24))
+
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays < 7) return 'This Week'
+  if (diffDays < 14) return 'Last Week'
+  const weeks = Math.floor(diffDays / 7)  
   return `${weeks} weeks ago`
 }

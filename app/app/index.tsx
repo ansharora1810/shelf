@@ -17,7 +17,7 @@ import { Image } from 'expo-image'
 import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
 import type { BottomSheetModal } from '@gorhom/bottom-sheet'
-import { getTopTags, groupLinksByWeek } from '../src/data/feed'
+import { getTopTags, groupLinksByPeriod } from '../src/data/feed'
 import { useShelf } from '../src/store/shelf'
 import { Link, Project } from '../src/types'
 import { titleAccent, formatConsumeTime } from '../src/data/title'
@@ -184,7 +184,7 @@ function SectionHeader({ label, count }: { label: string; count: number }) {
 }
 
 function TagFeed({ links }: { links: Link[] }) {
-  const groups = groupLinksByWeek(links)
+  const groups = groupLinksByPeriod(links)
   if (groups.length === 0) {
     return (
       <View style={styles.empty}>
@@ -501,6 +501,7 @@ const styles = StyleSheet.create({
   tabBarContent: {
     paddingHorizontal: Spacing.screenH,
     gap: 22,
+    paddingTop: 10,
     paddingBottom: 14,
   },
   tabItem: {
@@ -508,7 +509,7 @@ const styles = StyleSheet.create({
   },
   tabLabel: {
     fontFamily: FontFamily.sansMedium,
-    fontSize: 11,
+    fontSize: 13,
     letterSpacing: 0.7,
     color: Colors.textSecondary,
   },
