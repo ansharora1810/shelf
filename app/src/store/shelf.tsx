@@ -6,6 +6,7 @@ import { supabase } from '../lib/supabase'
 import { ItemRow, ItemStatus, ProjectRow } from '../lib/database.types'
 import { isHandover } from '../share/transport'
 import { useAuth } from './auth'
+import { WebViewFetcherHost, useClientFetchQueue } from '../lib/fetch-fallback'
 
 // Pull the shared URL out of a handover deep link (PRD §8.10). openHostApp's
 // native URL builder drops the `?` (so the value lands on the path, not as a
@@ -39,6 +40,7 @@ function mapItem(row: ItemRow): Link {
     projectId: row.project_id,
     consumeTime: row.consume_time,
     savedAt: row.created_at,
+    appFetchAttempts: row.app_fetch_attempts,
   }
 }
 
@@ -149,6 +151,12 @@ export function ShelfProvider({ children }: { children: ReactNode }) {
       void supabase.removeChannel(channel)
     }
   }, [userId, reconcile])
+
+  const pushRow = useCallback((row: ItemRow) => {
+    setLinks(prev => upsertById(prev, mapItem(row)))
+  }, [])
+
+  useClientFetchQueue(links, pushRow)
 
   const getLinkById = useCallback((id: string) => links.find(l => l.id === id), [links])
 
@@ -281,7 +289,12 @@ export function ShelfProvider({ children }: { children: ReactNode }) {
     [links, projects, getLinkById, getLinksForProject, createItem, updateItem, addItemTags, deleteLink, upsertProject, deleteProject],
   )
 
-  return <ShelfContext.Provider value={value}>{children}</ShelfContext.Provider>
+  return (
+    <ShelfContext.Provider value={value}>
+      {children}
+      <WebViewFetcherHost />
+    </ShelfContext.Provider>
+  )
 }
 
 export function useShelf(): ShelfContextValue {

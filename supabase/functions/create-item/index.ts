@@ -60,12 +60,13 @@ Deno.serve(async (req) => {
   }
 
   // -------------------------------------------------------------------------
-  // Insert the row at `processing` and return immediately. All enrichment
+  // Insert the row at `started` and return immediately. All enrichment
   // (title, thumbnail, resolved source, content, AI tags) is the worker's job,
   // fired by the AFTER INSERT trigger — so this stays a sub-100ms DB op and the
   // share sheet confirms instantly. `source` is a network-free best-effort from
-  // the normalized host; the worker corrects it after resolving redirects.
-  // Uses caller JWT → RLS sets user_id = auth.uid().
+  // the normalized host; fetch-item corrects it after resolving redirects.
+  // Uses caller JWT → RLS sets user_id = auth.uid(). `status_changed_at` is set
+  // by the items_set_status_changed_at trigger — never written here.
   // -------------------------------------------------------------------------
   const { data: item, error: insertError } = await supabase
     .from("items")
@@ -75,8 +76,7 @@ Deno.serve(async (req) => {
       normalized_url: normalizedUrl,
       source: classifySource(normalizedUrl),
       project_id: body.project_id ?? null,
-      status: "processing",
-      processing_started_at: new Date().toISOString(),
+      status: "started",
     })
     .select()
     .single();

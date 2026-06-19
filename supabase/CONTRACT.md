@@ -10,19 +10,33 @@ DB types: `app/src/lib/database.types.ts`. PRD: `.claude/prd/PRD.md`.
 `user_id` defaults to `auth.uid()` — direct-client and JWT-context inserts never pass it.
 
 `items` columns: `id, user_id, type('link'|'image'|'pdf', default 'link'), url, normalized_url,
-status('awaiting_upload'|'processing'|'ready'|'failed', default 'processing'),
-processing_started_at, raw_content, name, tags(text[] default {}), summary, thumbnail_url,
-consume_time(int seconds, nullable), project_id(fk→projects, on delete set null),
+status('awaiting_upload'|'started'|'fetched'|'fetch_failed'|'client_fetched'|'ready'|'failed', default 'started'),
+status_changed_at, app_fetch_attempts(int default 0), raw_content, name, tags(text[] default {}), summary,
+thumbnail_url, consume_time(int seconds, nullable), project_id(fk→projects, on delete set null),
 reminder_enabled(bool default false), source('youtube'|'instagram'|'website'), created_at, updated_at`.
+
+The staged-pipeline lifecycle (PRD §11.1) supersedes the single-stage `processing → ready/failed`:
+`started` (created, awaiting backend fetch) → `fetch-item` → `fetched` (body obtained) **or**
+`fetch_failed` (no body — the app fetches via webview on its residential IP) → `client_fetched` →
+`enrich-item` (one Gemini call over the body) → `ready`. `failed` is terminal. The app **never** writes
+`failed`: on a `fetch_failed` row it increments `app_fetch_attempts` (claim-then-work) then, on success,
+atomically writes `status='client_fetched'` + `raw_content`; the watchdog finalizes exhausted rows.
 
 `projects` columns: `id, user_id, name(1–20 chars), created_at, updated_at`.
 
 - No `embedding` column (semantic search is v2).
 - Dedup: partial unique index `(user_id, normalized_url) where type='link' and normalized_url is not null`.
-- `items` DELETE is RLS-blocked while `status='processing'`.
-- Both tables are in the `supabase_realtime` publication.
-- Watchdog `shelf_watchdog()` runs every minute via pg_cron: fails `processing` rows older than
-  120s and `awaiting_upload` rows older than 3 min.
+- `items` DELETE is RLS-blocked on all non-terminal states; allowed only on `ready` / `failed`.
+- Both tables are in the `supabase_realtime` publication. The app subscribes to non-terminal rows and
+  picks up `fetch_failed` to drive its webview fetch.
+- `status_changed_at` is maintained by the `items_set_status_changed_at` BEFORE trigger (on insert and
+  whenever `status` changes) — no writer sets it manually. The `app_fetch_attempts` increment doesn't
+  change status, so it doesn't bump it; deadlines measure true time-in-state.
+- Watchdog `shelf_watchdog()` runs every minute via pg_cron (PRD §11.1):
+  - `started` past 90s (time-in-state) → `fetch_failed`
+  - `fetched`/`client_fetched` past 90s (time-in-state) → `failed`
+  - `fetch_failed` with `app_fetch_attempts >= 3` → `failed` (**count-gated, no time predicate**)
+  - `awaiting_upload` past 3 min → `failed`
 
 ## URL normalization (must be identical in create fn AND frontend dedup awareness)
 
@@ -60,41 +74,56 @@ Also called by the share extension (v2) with an App Group JWT. `verify_jwt = tru
    - youtube: oEmbed (`https://www.youtube.com/oembed?url=…&format=json`) → `title`, `thumbnail_url`.
    - instagram: oEmbed/OG best-effort → `title`, `thumbnail_url` (fragile, may be null).
 5. Insert row (uses caller JWT so RLS sets `user_id`): `type='link'`, `url`, `normalized_url`,
-   `source`, `name = title` (nullable), `thumbnail_url`, `project_id`, `status='processing'`,
-   `processing_started_at = now()`. Leave `summary`, `tags`, `raw_content`, `consume_time` for the worker.
-6. Return `{ item: <full row>, deduped: false }`. The AFTER INSERT trigger (pg_net) fires the worker.
+   `source`, `project_id`, `status='started'`. Leave `name`, `summary`, `tags`, `raw_content`,
+   `consume_time`, `thumbnail_url` for the workers. `status_changed_at` is set by the BEFORE trigger —
+   never written here (and `processing_started_at` no longer exists).
+6. Return `{ item: <full row>, deduped: false }`. The AFTER INSERT trigger (pg_net) fires `fetch-item`.
 
 **Errors:** any failure that prevents inserting a row → non-2xx so the app shows "try again"
 (nothing enters the feed). A slow/empty origin is NOT an error — insert with whatever resolved.
 
-## Edge function: `process-item` (the worker, `mode='process'`)
+## Edge function: `fetch-item` (fetch stage, `mode='fetch'`)
 
-Invoked by the DB trigger via pg_net: **`POST { item_id: string, mode: 'process' }`**.
+Invoked by the AFTER INSERT trigger via pg_net: **`POST { item_id: string, mode: 'fetch' }`**.
 `verify_jwt = false` (called by the system, not a user); protect with a shared-secret header
 (`x-worker-secret`, value from env). Uses the **service-role key** (env `SUPABASE_SERVICE_ROLE_KEY`,
 auto-injected) — bypasses RLS; scope every write by `item_id`.
 
+**Behavior — fetch raw content only; no Gemini:**
+1. Load row by `item_id`. If `status != 'started'`, no-op (zombie/late retry).
+2. Resolve redirects, classify the destination, fetch full content by source → `title`,
+   `raw_content`, `consume_time`, `thumbnail_url`.
+3. **Status decision (PRD §11.1):** `fetched` only if a usable **body** was obtained
+   (`raw_content` non-empty after trim); otherwise `fetch_failed` — even when a title/thumbnail
+   were obtained (e.g. YouTube oEmbed yields title + thumbnail but no body → `fetch_failed`).
+4. **Single guarded write** (status + content together) — `UPDATE items SET … WHERE id = :item_id
+   AND status = 'started'`: `status` = `fetched`/`fetch_failed`, corrected `source`, `raw_content`,
+   `name` = user-set name else fetched title, `consume_time`/`thumbnail_url` coalesced. Persists
+   whatever title/thumbnail/source it got either way, so the app augments rather than starts blank.
+
+The `fetched` write fires `enrich-item` via the UPDATE trigger. A `fetch_failed` row is handed to the
+app (Realtime push + reconcile GETs) to fetch the body on its residential IP, then `client_fetched`.
+
+## Edge function: `enrich-item` (AI stage, `mode='enrich'`)
+
+Invoked by the AFTER UPDATE trigger via pg_net when a row enters `fetched`/`client_fetched`:
+**`POST { item_id: string, mode: 'enrich' }`**. Same scaffolding (`verify_jwt = false`,
+`x-worker-secret`, service-role key, always-200).
+
 **Behavior:**
-1. Load row by `item_id`. If `status != 'processing'`, no-op (zombie/late retry — §8.2).
-2. Fetch full content by source → build `raw_content`:
-   - website: full page text (boilerplate-stripped). Compute `consume_time` = `round(words / 225 * 60)` seconds.
-   - youtube: transcript (unofficial; fall back to description if unavailable). `consume_time` =
-     video length in seconds if obtainable (scrape `lengthSeconds` from the watch page), else leave null.
-   - instagram: caption text. `consume_time` = null.
-3. One **Gemini 2.5 Flash-Lite** structured-output call over `raw_content` (+ title) →
-   `{ name: string, summary: string, tags: string[] }` (exactly 10 tags, each kebab-case with a
-   leading `#`, e.g. `#deep-work`). Key in env `GEMINI_API_KEY`.
-4. **Guarded terminal write** — `UPDATE items SET … WHERE id = :item_id AND status = 'processing'`:
-   - `summary` = AI summary (always; AI-owned, immutable)
-   - `tags` = union(existing tags, AI tags) — never clobber user tags
-   - `name` = `coalesce(nullif(name,''), ai_name)` — only fills when create left it blank; never
-     clobbers a parsed title or a user edit
-   - `consume_time` = `coalesce(consume_time, computed)`
-   - `raw_content` = built content (immutable base; v2 embedding source)
-   - `status` = `'ready'`
-5. Degrade gracefully: a missing transcript/caption/parse still lands at `ready` with `#all` + whatever
-   parsed. `status='failed'` (same guard) is reserved for "nothing usable produced" (URL unreachable
-   and no title). The watchdog is the backstop if the worker crashes.
+1. Load row by `item_id`. If `status not in ('fetched','client_fetched')`, no-op.
+2. Build the prompt from `name`/title + `raw_content` + `url`. Fetch the user's tag vocabulary
+   (`get_user_tags`) and bias the model toward reuse.
+3. One **Gemini 2.5 Flash-Lite** structured-output call → `{ name, summary, tags[] }` (3–6 tags,
+   each kebab-case with a leading `#`). Key in env `GEMINI_API_KEY`.
+4. **Guarded terminal write** — `UPDATE items SET … WHERE id = :item_id AND status IN
+   ('fetched','client_fetched')` (`ready` excluded so this write can't self-trigger the enrich kick):
+   - `status` = `'ready'` (`failed` reserved for the truly-nothing case — by this stage there's
+     almost always a body or title)
+   - `summary` = AI summary (AI-owned)
+   - `name` = user-set / fetched name, else AI name, else keep
+5. `add_item_tags` RPC (atomic append: `tags || ai_tags`) — only if the guarded write won, so a
+   concurrent manual-add tag merge is never clobbered.
 
 No `reembed` mode in v1 (v2). No retry/`reprocess` endpoint in v1 (failed → user removes + re-adds).
 
@@ -106,8 +135,10 @@ The frontend's `Link`/`Item` type maps DB snake_case → camelCase. Key changes 
   `descriptor`/`title` split anywhere.
 - **`consumeTime` is `number | null` (seconds).** A client-side `formatConsumeTime(seconds)` produces
   the badge label (e.g. 720 → "12m", 3720 → "1h 2m"). Badge hidden when null/0.
-- `status: ItemStatus` is new and drives card state: `processing` → skeleton fill-in; `failed` →
-  Remove affordance (v1, no retry); `ready` → normal.
+- `status: ItemStatus` drives card state: `started`/`fetched`/`client_fetched` → skeleton fill-in;
+  `fetch_failed` → the app fetches the body via its hidden webview (claim-then-work: increment
+  `app_fetch_attempts` first, then atomically write `client_fetched` + `raw_content` on success);
+  `failed` → Remove affordance (v1, no retry); `ready` → normal.
 - `savedAt` ← `created_at`. `reminderEnabled` ← `reminder_enabled`. `thumbnail` ← `thumbnail_url`.
   `projectId` ← `project_id`.
 - `Project` loses stored `linkCount` — membership/count is derived client-side from the item list.
@@ -118,9 +149,10 @@ The frontend's `Link`/`Item` type maps DB snake_case → camelCase. Key changes 
   `deduped` show "Already in your shelf" + surface existing item; else popup expands with returned
   non-AI fields → Save = `PUT` (supabase `.update()`) of user `name`/`tags`/`project_id`/`reminder_enabled`.
 - Plain CRUD is direct supabase client + RLS: `GET` = `.select('*')`, edit = `.update()`,
-  delete item = `.delete()` (will be rejected while processing), upsert project = `.insert()`/`.update()`,
+  delete item = `.delete()` (rejected on any non-terminal state), upsert project = `.insert()`/`.update()`,
   delete project = `.delete()` after first nulling or deleting member items per the `delete_items` choice.
 - Realtime: subscribe to `items` changes where `user_id = me` (filter client-side on payload) for
-  non-terminal fill-in. Reconcile via full parallel `GET items`+`GET projects` on session-acquired,
-  foreground, network reconnect, and realtime re-subscribe. No polling.
+  non-terminal fill-in **and** to pick up `fetch_failed` rows to drive the client-assisted fetch.
+  Reconcile via full parallel `GET items`+`GET projects` on session-acquired, foreground, network
+  reconnect, and realtime re-subscribe — also recovers missed `fetch_failed` pushes. No polling.
 - All data access gated on an authenticated session; re-fetch on logout→login.

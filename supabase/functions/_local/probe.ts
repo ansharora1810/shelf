@@ -1,4 +1,4 @@
-// Exercises the worker's content-fetch stage (process-item/index.ts:88-102)
+// Exercises the worker's content-fetch stage (fetch-item/index.ts)
 // from this machine's residential IP — a stand-in for what a client-side fetch
 // would see. Reuses the worker's own modules so the output matches it exactly.
 //

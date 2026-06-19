@@ -1,9 +1,7 @@
 import { FullContent, Parser } from "./types.ts";
 import { fetchWithTimeout } from "./http.ts";
 import { parseMeta } from "./html.ts";
-
-const CONTENT_TIMEOUT_MS = 10_000;
-const WORDS_PER_MINUTE = 225;
+import { CONTENT_FETCH_TIMEOUT_MS as CONTENT_TIMEOUT_MS, WORDS_PER_MINUTE } from "../constants.ts";
 
 // Reddit serves a bot-verification wall to the generic crawler UA, so the
 // default WebsiteParser yields nothing. The public `.json` view of a post
