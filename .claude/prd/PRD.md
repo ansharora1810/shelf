@@ -774,3 +774,80 @@ _Snapshot: 2026-06-14. Real Supabase data layer (direct client + RLS, Realtime f
 | Push notification reminders | ⛔ Pending | No `expo-notifications` integration |
 | Onboarding screens | ⛔ Pending | Only Login exists — no welcome / feature / notification-permission screens |
 | Pricing / trial / Apple IAP | ⛔ Pending | Not built |
+
+---
+
+## 11. In-progress design decisions
+
+_Designs agreed but not yet built — captured so they can be picked up later. Not yet reflected in §8 or §10. Each entry: what we're solving for, the agreed design, and what's still open._
+
+### 11.1 Backend fetch failure → client-assisted fetch fallback
+
+**What we're solving for.** The backend content fetch frequently fails on sites that IP-block the datacenter egress or serve JS challenges (same root cause as the YouTube IP-wall, §8.4). Today's single-stage worker has no recovery — it degrades or fails. The fix: split fetching from AI processing, and when the backend can't fetch, hand the item to the **app** (residential IP + a hidden webview) to fetch the raw content, then resume backend AI processing. This is also the residential-IP path §2/§8.4 flagged as the eventual unblock for YouTube et al.
+
+When adopted, this **supersedes the single-stage `processing → ready/failed` lifecycle of §8.2** and adds a second pg_net hop (§8.9).
+
+**Design — staged pipeline.** Split today's `process-item` into a fetch stage and an AI stage, with a client-assisted middle step.
+
+States:
+
+| State | Meaning | Exits via |
+|---|---|---|
+| `started` | created, awaiting backend fetch (= today's `processing`) | `fetch-item` |
+| `fetched` | backend fetched raw content | `enrich-item` |
+| `fetch_failed` | backend fetch blocked; awaiting client fetch | app |
+| `client_fetched` | client fetched raw content via webview | `enrich-item` |
+| `ready` | AI processing done — terminal success | — |
+| `failed` | terminal failure | — |
+
+Functions:
+- **`create-item`** (unchanged) — normalize → dedup → insert at `started` → return. Unchanged but for the status name.
+- **`fetch-item`** (today's `process-item`, descoped) — fetch raw content only; no Gemini. `started → fetched | fetch_failed`.
+- **`enrich-item`** (new) — one grounded Gemini call over `raw_content` → name/summary/tags. `fetched | client_fetched → ready`.
+- **App** (client) — on `fetch_failed`, fetch via the hidden webview. `fetch_failed → client_fetched`. (Webview mechanics are a separate abstraction, out of scope here.)
+
+Triggers (all pg_net — fire-and-forget, at-most-once, §8.9):
+- `AFTER INSERT WHEN status='started'` → `fetch-item` (today's `items_fire_worker`, renamed).
+- `AFTER UPDATE WHEN status IN ('fetched','client_fetched')` → `enrich-item`. `ready` is excluded from the condition so `enrich-item`'s own write can't self-trigger.
+- Realtime pushes `fetch_failed` to the app; the app also picks up `fetch_failed` rows on its reconcile GETs (foreground / reconnect / re-subscribe, §8.2) so a missed push is recovered.
+
+Transitions — one writer class each, every write a guarded CAS (idempotent handoffs):
+
+| From | To | Writer | Guard |
+|---|---|---|---|
+| `started` | `fetched` / `fetch_failed` | `fetch-item` | `WHERE status='started'` |
+| `fetch_failed` | `client_fetched` | app | `WHERE status='fetch_failed' AND app_fetch_attempts < N` |
+| `fetch_failed` | `failed` | watchdog (count-gated) | `WHERE status='fetch_failed' AND app_fetch_attempts >= N` |
+| `fetched` / `client_fetched` | `ready` | `enrich-item` | `WHERE status IN ('fetched','client_fetched')` |
+
+The app **never** sets `failed` — it only fetches (`count < N`) and, on success, writes `client_fetched`. Finalizing an exhausted row to `failed` is the watchdog's job (count-gated, below). On a failed attempt the app just leaves the row at `fetch_failed` with the count already incremented, for a later retry.
+
+**Atomicity:** each transition writes its **status and content in a single `UPDATE`** (never status first, content second), so the process_content trigger never fires against a row whose content hasn't landed.
+
+Watchdog (pg_cron), per-state — time-gated rules use a new `status_changed_at` so deadlines measure **time-in-state**, not age-since-create; the `fetch_failed` rule is the one exception (count-gated, no time component):
+
+| State | Sweep rule |
+|---|---|
+| `started` | time-gated: past fetch deadline → `fetch_failed` (hand to the app; covers a dropped kick / hung fetcher — escalation, **not** a worker retry) |
+| `fetched` / `client_fetched` | time-gated: past Gemini deadline → `failed` (no re-kick; fetched content is discarded — **decided**: no worker retries in v1) |
+| `fetch_failed` | **count-gated, no deadline**: `app_fetch_attempts >= N → failed`. The cap is only reached after the app has tried `N` times, so offline-app rows (`count < N`) never match and can sit for days. This is the only watchdog rule with no time component. It also finalizes a row even if the app never reopens, and catches a claim-then-crash that pushed the count to `N`. |
+| `ready` / `failed` | terminal — not swept |
+
+**Client attempt cap — claim-then-work** (the fix for the `fetch_failed` infinite-fetch loop): the app records progress on **pickup**, not on completion, so a glitch/crash still advances state.
+- New column `app_fetch_attempts int default 0`.
+- App selects `fetch_failed` rows `WHERE app_fetch_attempts < N` (rows at the cap belong to the watchdog).
+- **Increment `app_fetch_attempts` before starting the webview fetch** (claim-then-work). A crash between the increment and the result still leaves the count advanced.
+- Success → `client_fetched` + content (single atomic update). A failed attempt leaves the row at `fetch_failed` (count already incremented) for a later retry — **the app never writes `failed`**.
+- The watchdog finalizes: once `app_fetch_attempts >= N`, its count-gated sweep marks the row `failed` (table above). Total client attempts are bounded at `N` regardless of how each attempt ends. (Same shape as SQS `maxReceiveCount` → DLQ — the count-gated watchdog is the dead-letter step.)
+
+Schema deltas this implies:
+- `status` enum: `processing→started`, `ready` (keep), `failed` (keep), plus new `fetched`, `fetch_failed`, `client_fetched`.
+- add `app_fetch_attempts int default 0`.
+- add `status_changed_at` (bumped only when `status` changes; drives the time-in-state watchdog deadlines).
+- `DELETE` stays blocked on all non-terminal states, allowed on `ready` / `failed`.
+
+#### Still in progress
+
+1. **Securing the app's direct DB writes (the `raw_content` / Gemini-bill problem).** The app must write `raw_content` — it's the fetch source in this design — so we can't simply block client writes to that column. But an unconstrained client `.update()` lets a user write arbitrary `raw_content` that we then feed to Gemini (running up the API bill), or set `status` directly and skip stages. RLS scopes the damage to the user's own rows (no cross-user impact), so it's tolerable for v1 with no users, but it's a real cost/abuse vector. Needed: a guarded write path (e.g. a `SECURITY DEFINER` RPC) that (a) permits only the `fetch_failed → client_fetched` transition from the correct source state, (b) restricts writable columns to `raw_content` / `status` / `app_fetch_attempts`, and (c) **bounds `raw_content` size** to cap Gemini cost. The tension: the app legitimately supplies the content, so the guard has to constrain *shape / size / transition*, not forbid the write. Prioritize when subscriptions / paid tiers land, or earlier if Gemini spend needs protecting.
+2. **Tuning:** the client attempt cap `N`, and the per-state watchdog deadlines. Splitting fetch from Gemini lets each get its own deadline above its stage's P99 — tighter than today's single 120s.
+3. **Watchdog vs. in-flight final attempt (race).** Because the app increments *before* fetching (claim-then-work), a row becomes count-gate-eligible (`>= N`) at the **start** of its Nth attempt. If the cron sweep lands during that fetch, the watchdog sets `failed` and the app's (successful) Nth `client_fetched` write then no-ops on its `WHERE status='fetch_failed'` guard — a fetchable item is lost. The window is only the final attempt (rows at `count < N` never match the count gate). This is the same no-fencing-token trade-off as §8.2. **Decide:** accept it (rare, last attempt only, user can Remove + re-add), or add a small staleness gate to the finalize — `AND last_app_attempt_at < now() - grace` (grace > max webview fetch), which needs a `last_app_attempt_at` column set on each claim so the watchdog won't finalize a row the app is actively working.

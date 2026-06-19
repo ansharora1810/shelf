@@ -30,3 +30,7 @@ export function isYouTube(host: string): boolean {
 export function isInstagram(host: string): boolean {
   return matchesPlatform(host, "instagram.com");
 }
+
+export function isReddit(host: string): boolean {
+  return matchesPlatform(host, "reddit.com");
+}

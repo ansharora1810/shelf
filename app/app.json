@@ -18,7 +18,9 @@
         "AppGroupIdentifier": "group.com.shelf.app"
       },
       "entitlements": {
-        "com.apple.security.application-groups": ["group.com.shelf.app"]
+        "com.apple.security.application-groups": [
+          "group.com.shelf.app"
+        ]
       }
     },
     "web": {
@@ -35,10 +37,18 @@
       [
         "expo-share-extension",
         {
-          "activationRules": [{ "type": "url", "max": 1 }],
+          "activationRules": [
+            {
+              "type": "url",
+              "max": 1
+            }
+          ],
           "height": 380
         }
       ]
-    ]
+    ],
+    "android": {
+      "package": "com.ansharora.shelf"
+    }
   }
 }
