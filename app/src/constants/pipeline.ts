@@ -11,6 +11,7 @@ export const IG_NAME_MAX_LEN = 100 // "@owner: caption" title truncation
 
 // Claim-then-work retry (src/lib/fetch-fallback/useClientFetchQueue)
 export const MAX_APP_FETCH_ATTEMPTS = 3 // MUST equal the SQL watchdog's `app_fetch_attempts >= N`
+export const RETRY_SCAN_INTERVAL_MS = 20_000 // foreground re-scan so fetch_failed rows retry without a new realtime/reconcile event
 
 // Verbose website fetch/parse logging (raw HTML, parsed body, load errors).
 // Surfaces in the Metro console. Set false for release.

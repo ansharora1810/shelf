@@ -1,10 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../supabase'
 import { ItemRow } from '../database.types'
 import { Link } from '../../types'
 import { fetchViaWebView } from './WebViewFetcher'
 import { detectSource } from './source'
-import { MAX_APP_FETCH_ATTEMPTS } from '../../constants/pipeline'
+import { MAX_APP_FETCH_ATTEMPTS, RETRY_SCAN_INTERVAL_MS } from '../../constants/pipeline'
 
 // Claim-then-work (PRD §11.1): on each `fetch_failed` row under the attempt cap,
 // increment the counter via a guarded CAS *before* fetching, then on success
@@ -13,6 +13,17 @@ import { MAX_APP_FETCH_ATTEMPTS } from '../../constants/pipeline'
 // watchdog to finalize. The app never writes `failed`.
 export function useClientFetchQueue(links: Link[], pushRow: (row: ItemRow) => void) {
   const inProgress = useRef(new Set<string>())
+  const [tick, setTick] = useState(0)
+
+  // A failed attempt writes nothing new, so the effect below wouldn't re-fire
+  // until the next realtime/reconcile event — which may never come, leaving the
+  // row stuck at `fetch_failed` below the watchdog's count gate. Re-scan on an
+  // interval (foreground only — JS timers pause in the background) so retries
+  // keep firing up to the cap without depending on an external event.
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), RETRY_SCAN_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     const pending = links.filter(
@@ -25,7 +36,7 @@ export function useClientFetchQueue(links: Link[], pushRow: (row: ItemRow) => vo
       inProgress.current.add(link.id)
       void processLink(link, pushRow).finally(() => inProgress.current.delete(link.id))
     }
-  }, [links, pushRow])
+  }, [links, tick, pushRow])
 }
 
 async function processLink(link: Link, pushRow: (row: ItemRow) => void): Promise<void> {
