@@ -908,3 +908,56 @@ This is the foundation only — it makes throughput **degrade gracefully (queue 
 2. **`in_flight` accounting precision vs. the `dispatched_at` slot leak.** The stuck-slot trade-off above means `in_flight` can over-count under failure, under-utilising `K`. If that bites, the minimal fix is a short **dispatch lease** (`dispatched_at < now() - lease` → reclaimable) — but that is a visibility timeout by another name and was deliberately excluded; only add it if slot-leak throttling proves real.
 3. **Whether the enrich drainer should prioritise `client_fetched` over `fetched`.** A `client_fetched` row has a user who just reopened the app and is actively waiting; a `fetched` row is mid-backend-pipeline. `ORDER BY` could favour `client_fetched` for perceived latency. Cosmetic; revisit if it matters.
 4. **pgmq upgrade seam.** If true multi-consumer, archival/replay, or queue-depth metrics are ever needed, swap the table-as-queue for **pgmq**: the drainer reads from pgmq instead of `… WHERE status = <stage>`, the trigger `pgmq.send`s instead of being removed, and the worker is unchanged. Deferred — at this scale it only adds a dual-write (row + message) consistency burden for no gain (§8.9).
+
+### 11.3 Search architecture — Composite + Strategy (semantic + fuzzy)
+
+**What we're solving for.** §8.6 specifies semantic search as a v2 differentiator but leaves the internal architecture open. Two decisions were settled: (a) what text to embed per item, and (b) how to structure the search code to compose semantic and fuzzy search cleanly.
+
+**Embedding input — structured prose, not raw concatenation.** §8.6 originally specified `raw_content + current name + current tags` as the embedding source. This is revised. Two problems with `raw_content` as the embedding input: (1) website `raw_content` is often thousands of tokens — full page text including navigation, footers, and boilerplate — and the model's token limit (~8,000 for `text-embedding-3-small`) means the tail is silently truncated, often losing the most substantive content; (2) dumping fields together without structure loses the signal about what each part means.
+
+The agreed input is a **labelled, structured string** built from the fields the `enrich-item` worker already produces:
+
+```
+Title: [name]
+Tags: [tag1, tag2, tag3, ...]
+Summary: [summary]
+```
+
+`summary` is the AI-distilled meaning of the full content — denser and more semantically coherent than truncated `raw_content`. `name` and `tags` reinforce findability. The labels (`Title:`, `Tags:`, `Summary:`) give the model context about each part's role; the model has seen this pattern extensively and weights accordingly. `raw_content` remains stored immutably (§8.1) as the source of truth for future re-summarisation or re-embedding, but is not itself fed to the embedding model.
+
+**Code design — Composite over Strategy.** The `POST /search` Edge Function hosts a `Search` class that is a **Composite** (Gang of Four) over two **Strategy** implementations, all sharing the same `ISearch` interface:
+
+```typescript
+interface ISearch {
+  search(query: string, userId: string): Promise<Item[]>
+}
+
+class FuzzySearch implements ISearch { ... }    // pg_trgm on name + tags
+class SemanticSearch implements ISearch { ... } // pgvector on embedding column
+class Search implements ISearch {               // composite: runs both, merges
+  constructor(private strategies: ISearch[]) {}
+  async search(query, userId) {
+    const results = await Promise.all(
+      this.strategies.map(s => s.search(query, userId))
+    )
+    return merge(results) // deduplicate by id, rank
+  }
+}
+```
+
+The caller (the Edge Function handler) only talks to `Search`. Adding a third strategy (e.g. BM25 full-text) is one new class and one constructor argument; the merge and ranking logic is untouched.
+
+**Fuzzy search scope — `name` and `tags` only, not `raw_content`.** `pg_trgm` (trigram matching) is designed for short strings. On long body text it is slow, expensive, and returns noise — nearly every document shares trigrams with every short query. Fuzzy search's value is handling typos and near-misspellings in the structured fields a user can directly see and type (`name`, `tags`). `raw_content` is excluded from fuzzy scope entirely.
+
+**Semantic search scope — `embedding` column, queried via pgvector.** The `SemanticSearch` strategy embeds the user's query (same OpenAI API call, server-side key) and runs a cosine-distance `<=>` query against the HNSW-indexed `embedding` column. Returns items ranked by vector closeness. Handles synonym and concept matching that fuzzy cannot (`soy` surfaces `soya`, `machine learning` surfaces `neural networks`).
+
+**Indexing — `enrich-item` generates and stores the embedding.** When `enrich-item` produces `name`/`summary`/`tags`, it also calls OpenAI with the structured string above and writes the result to the `embedding` column in the same terminal write. No separate worker mode needed at this scale — the embedding generation is a single fast API call appended to the existing Gemini call.
+
+Re-embed on edit (§8.6) remains the design: a name or tag edit fires a Postgres trigger → pg_net → `reembed` mode of the worker, regenerating only the `embedding` column. This is unchanged from §8.6.
+
+#### Still in progress
+
+1. **Merge and ranking strategy.** The `merge()` step needs a concrete algorithm. Options: (a) deduplicate by item `id`, interleave results alternating by source; (b) normalise each strategy's results to a 0–1 score and compute a weighted sum (`0.6 × semantic + 0.4 × fuzzy`); (c) Reciprocal Rank Fusion (RRF) — a parameter-free rank-combination formula that is robust to score-scale differences. RRF is the leading candidate; decide before implementation.
+2. **Fuzzy threshold tuning.** `pg_trgm` has a similarity threshold (`pg_trgm.similarity_threshold`) that controls the minimum overlap for a match. Too low returns noise; too high misses useful near-matches. Needs empirical tuning against real item data.
+3. **HNSW index parameters.** pgvector's HNSW index has two build-time parameters (`m`, `ef_construction`) that trade index size / build time against recall quality. Defaults are reasonable at this scale but should be validated once real items are indexed.
+4. **Whether to include `raw_content` in the embedding for items where `summary` is absent.** If `enrich-item` fails to produce a summary (degraded Gemini call), the structured string reduces to `Title: [name]\nTags: [...]`. This may be too sparse for meaningful semantic matching. Fallback: use the first N tokens of `raw_content` as a substitute for `summary` in the embedding input for those items only.
