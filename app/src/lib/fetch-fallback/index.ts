@@ -1,4 +1,5 @@
 export { fetchViaWebView, WebViewFetcherHost } from './WebViewFetcher'
 export { detectSource } from './source'
 export { useClientFetchQueue } from './useClientFetchQueue'
+export { logFetch } from './log'
 export type { ExtractedContent, FetchSource } from './types'

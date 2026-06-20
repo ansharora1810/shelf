@@ -2,6 +2,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, handleOptions } from "../_shared/cors.ts";
 import { normalizeUrl } from "../_shared/url.ts";
 import { classifySource } from "../_shared/source.ts";
+import { makeLogger } from "../_shared/log.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -82,7 +83,11 @@ Deno.serve(async (req) => {
     .single();
 
   if (insertError || !item) {
-    console.error("create-item insert error:", insertError);
+    makeLogger("create", "-").error("insert-failed", {
+      user: user.id,
+      url: normalizedUrl,
+      error: insertError,
+    });
     return json({ error: "Failed to create item" }, 500);
   }
 

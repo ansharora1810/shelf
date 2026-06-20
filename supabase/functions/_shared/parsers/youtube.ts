@@ -1,6 +1,6 @@
 import { FullContent, Parser } from "./types.ts";
 import { fetchWithTimeout } from "./http.ts";
-import { RESOLVE_URL_TIMEOUT_MS } from "../constants.ts";
+import { YOUTUBE_OEMBED_TIMEOUT_MS } from "../constants.ts";
 
 // YouTube parser. Title + thumbnail come from oEmbed — the only YouTube endpoint
 // that returns real metadata from a datacenter IP. InnerTube and the watch page
@@ -37,7 +37,7 @@ export class YoutubeParser implements Parser {
   ): Promise<{ title: string | null; thumbnailUrl: string | null } | null> {
     const oembedUrl =
       `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`;
-    const res = await fetchWithTimeout(oembedUrl, RESOLVE_URL_TIMEOUT_MS);
+    const res = await fetchWithTimeout(oembedUrl, YOUTUBE_OEMBED_TIMEOUT_MS);
     if (!res?.ok) return null;
     try {
       const json = await res.json();

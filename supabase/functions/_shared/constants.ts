@@ -5,12 +5,14 @@
 // boundary are noted below.
 
 // Network timeouts (ms)
-export const RESOLVE_URL_TIMEOUT_MS = 8_000; // fetch-item HEAD redirect resolution + youtube oEmbed
-export const CONTENT_FETCH_TIMEOUT_MS = 10_000; // parser page/content fetches
+export const RESOLVE_URL_TIMEOUT_MS = 3_000; // fetch-item HEAD redirect resolution
+export const YOUTUBE_OEMBED_TIMEOUT_MS = 3_000; // youtube oEmbed metadata fetch
+export const CONTENT_FETCH_TIMEOUT_MS = 3_000; // parser page/content fetches
 
 // Content heuristics
 export const WORDS_PER_MINUTE = 225; // consume-time estimate (reddit, website)
 export const IG_NAME_MAX_LEN = 100; // "@owner: caption" title truncation
+export const INTERSTITIAL_MAX_BODY_CHARS = 1_500; // bot-wall bodies are tiny; longer ⇒ real content
 
 // Gemini (enrich-item)
 export const GEMINI_MAX_ATTEMPTS = 4;

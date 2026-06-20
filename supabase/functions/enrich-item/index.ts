@@ -1,5 +1,6 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { handleOptions, json } from "../_shared/cors.ts";
+import { Logger, makeLogger } from "../_shared/log.ts";
 import {
   GEMINI_BACKOFF_MS,
   GEMINI_CONTENT_LIMIT,
@@ -55,7 +56,7 @@ Deno.serve(async (req) => {
   try {
     await enrichItem(supabase, item_id);
   } catch (err) {
-    console.error(`enrich-item unhandled error for ${item_id}:`, err);
+    makeLogger("enrich", item_id).error("unhandled", err);
   }
 
   // Always 200 to pg_net — caller doesn't act on the response body.
@@ -70,6 +71,8 @@ async function enrichItem(
   supabase: ReturnType<typeof createClient>,
   itemId: string,
 ): Promise<void> {
+  const log = makeLogger("enrich", itemId);
+
   // 1. Load the row.
   const { data: item, error: loadError } = await supabase
     .from("items")
@@ -78,14 +81,16 @@ async function enrichItem(
     .single();
 
   if (loadError || !item) {
-    console.error(`enrich-item: row not found for ${itemId}`, loadError);
+    log.error("row-not-found", loadError);
     return;
   }
 
   // 2. Guard: only enrich a row that has content waiting (zombie / late → no-op).
   if (!ENRICHABLE_STATUSES.includes(item.status as string)) {
+    log.debug("skip", `status=${item.status}`);
     return;
   }
+  log.info("start", `status=${item.status}`);
 
   const url: string = item.normalized_url ?? item.url ?? "";
 
@@ -104,14 +109,15 @@ async function enrichItem(
     supabase,
     item.user_id as string,
     itemId,
+    log,
   );
 
   // 5. One Gemini call for structured output.
   let aiResult: GeminiResult | null = null;
   try {
-    aiResult = await callGemini(promptContext, existingTags);
+    aiResult = await callGemini(promptContext, existingTags, log);
   } catch (err) {
-    console.error(`enrich-item: Gemini call failed for ${itemId}:`, err);
+    log.error("gemini-failed", err);
   }
 
   // 6. Guarded terminal write — WHERE id = :itemId AND status IN
@@ -137,12 +143,10 @@ async function enrichItem(
     .select("id");
 
   if (updateError) {
-    console.error(
-      `enrich-item: terminal write failed for ${itemId}:`,
-      updateError,
-    );
+    log.error("write-failed", updateError);
     return;
   }
+  log.info("done", `status=${finalStatus}`);
 
   // 7. Append AI tags atomically (tags || new), only if we won the terminal
   //    write. Same path as the manual-add Save — both writers append, neither
@@ -154,7 +158,7 @@ async function enrichItem(
       p_tags: aiTags,
     });
     if (tagError) {
-      console.error(`enrich-item: tag merge failed for ${itemId}:`, tagError);
+      log.error("tag-merge-failed", tagError);
     }
   }
 }
@@ -187,6 +191,7 @@ function buildPromptContext(
 async function callGemini(
   context: string,
   existingTags: string[],
+  log: Logger,
 ): Promise<GeminiResult> {
   let last: GeminiResult = { name: "", summary: "", tags: [] };
   for (let attempt = 0; attempt < GEMINI_MAX_ATTEMPTS; attempt += 1) {
@@ -196,7 +201,7 @@ async function callGemini(
       if (result.tags.length > 0) return result;
       last = result;
     } catch (err) {
-      console.error("enrich-item: Gemini attempt failed, will retry:", err);
+      log.error("gemini-retry", `attempt=${attempt + 1}/${GEMINI_MAX_ATTEMPTS} ${err instanceof Error ? err.message : err}`);
     }
   }
   return last;
@@ -294,13 +299,14 @@ async function fetchUserTags(
   supabase: ReturnType<typeof createClient>,
   userId: string,
   excludeId: string,
+  log: Logger,
 ): Promise<string[]> {
   const { data, error } = await supabase.rpc("get_user_tags", {
     p_user_id: userId,
     p_exclude_id: excludeId,
   });
   if (error) {
-    console.error(`enrich-item: get_user_tags failed for ${userId}:`, error);
+    log.error("user-tags-failed", `user=${userId} ${error.message ?? ""}`);
     return [];
   }
   return Array.isArray(data)
