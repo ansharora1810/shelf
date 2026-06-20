@@ -112,7 +112,6 @@ export type ItemStatus =
   | 'started'
   | 'fetched'
   | 'fetch_failed'
-  | 'client_fetched'
   | 'ready'
   | 'failed'
 // `source` is the link's real host (e.g. "youtube.com", "tiktok.com",

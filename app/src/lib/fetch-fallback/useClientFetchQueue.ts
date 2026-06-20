@@ -9,7 +9,9 @@ import { MAX_APP_FETCH_ATTEMPTS } from '../../constants/pipeline'
 
 // Client-assisted fetch (PRD §8.2). The app drives `fetch_failed` rows: it claims
 // one by atomically stamping `dispatched_at` (set-if-null) and bumping the attempt
-// counter, fetches the body on its residential IP, then writes `client_fetched`.
+// counter, fetches the body on its residential IP, then writes `fetched` — the
+// same body-obtained state the backend writes. The residential-fetch provenance
+// lives in `app_fetch_attempts` (> 0), not a distinct status.
 //
 // `dispatched_at` is the one claim marker shared with the backend drainers — a
 // status change auto-nulls it (DB trigger), so a successful fetch frees the slot
@@ -58,7 +60,7 @@ async function processLink(link: Link, pushRow: (row: ItemRow) => void): Promise
     return
   }
 
-  const patch: Partial<ItemRow> = { status: 'client_fetched' }
+  const patch: Partial<ItemRow> = { status: 'fetched' }
   if (content.rawContent) patch.raw_content = content.rawContent
   if (content.title && !link.name) patch.name = content.title
   if (content.thumbnailUrl && !link.thumbnail) patch.thumbnail_url = content.thumbnailUrl

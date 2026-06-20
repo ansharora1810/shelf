@@ -57,12 +57,13 @@ create table public.items (
   normalized_url     text,
   source             text,                       -- real normalized host (tldts); free text
   -- staged-pipeline lifecycle (§11.1): started → fetched|fetch_failed →
-  -- client_fetched → ready|failed; awaiting_upload reserved for v2 file uploads.
+  -- ready|failed; awaiting_upload reserved for v2 file uploads. The app's
+  -- residential-IP fetch also lands `fetched` (provenance in app_fetch_attempts).
   status             text not null default 'started'
                        constraint items_status_check
                        check (status = any (array[
                          'awaiting_upload','started','fetched',
-                         'fetch_failed','client_fetched','ready','failed'])),
+                         'fetch_failed','ready','failed'])),
   status_changed_at  timestamptz,                 -- time-in-state clock (trigger-maintained)
   dispatched_at      timestamptz,                 -- paced-dispatch claim (§11.2); nulled on status change
   app_fetch_attempts int not null default 0,      -- client-assisted fetch attempt cap (§11.1)
@@ -192,7 +193,7 @@ as $$
      and status_changed_at < now() - interval '90 seconds';
 
   update public.items set status = 'failed'
-   where status in ('fetched','client_fetched')
+   where status = 'fetched'
      and status_changed_at < now() - interval '90 seconds';
 
   update public.items set status = 'failed'
@@ -206,7 +207,7 @@ $$;
 
 -- ── Paced-dispatch drainers (pg_cron; §11.2) ─────────────────────────────────
 -- The items table IS the queue, partitioned by status (started = fetch queue;
--- fetched/client_fetched = enrich queue). Each drainer counts in-flight rows for
+-- fetched = enrich queue). Each drainer counts in-flight rows for
 -- its stage and, while below K, claims undispatched rows (FOR UPDATE SKIP LOCKED),
 -- stamps dispatched_at, and fires the worker via pg_net. K=1 = serial per stage.
 create or replace function public.shelf_drain_fetch()
@@ -277,7 +278,7 @@ declare
 begin
   select count(*) into in_flight
   from public.items
-  where status in ('fetched', 'client_fetched') and dispatched_at is not null;
+  where status = 'fetched' and dispatched_at is not null;
 
   slots := k_enrich - in_flight;
   if slots <= 0 then
@@ -292,7 +293,7 @@ begin
     with claimed as (
       select id
       from public.items
-      where status in ('fetched', 'client_fetched') and dispatched_at is null
+      where status = 'fetched' and dispatched_at is null
       order by created_at
       for update skip locked
       limit slots

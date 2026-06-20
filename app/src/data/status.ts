@@ -4,7 +4,6 @@ const IN_PROGRESS: ReadonlySet<ItemStatus> = new Set<ItemStatus>([
   'started',
   'fetched',
   'fetch_failed',
-  'client_fetched',
 ])
 
 // Non-terminal states that still show the shimmer placeholder. `ready` renders

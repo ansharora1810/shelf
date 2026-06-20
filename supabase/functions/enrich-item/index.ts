@@ -17,7 +17,7 @@ const WORKER_SECRET = Deno.env.get("WORKER_SECRET")!;
 const GEMINI_URL =
   `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
 
-const ENRICHABLE_STATUSES = ["fetched", "client_fetched"];
+const ENRICHABLE_STATUS = "fetched";
 
 interface GeminiResult {
   name: string;
@@ -86,7 +86,7 @@ async function enrichItem(
   }
 
   // 2. Guard: only enrich a row that has content waiting (zombie / late → no-op).
-  if (!ENRICHABLE_STATUSES.includes(item.status as string)) {
+  if (item.status !== ENRICHABLE_STATUS) {
     log.debug("skip", `status=${item.status}`);
     return;
   }
@@ -120,11 +120,11 @@ async function enrichItem(
     log.error("gemini-failed", err);
   }
 
-  // 6. Guarded terminal write — WHERE id = :itemId AND status IN
-  //    ('fetched','client_fetched') so a watchdog that already failed the row
-  //    wins and we no-op. `ready` is excluded so this write can't self-trigger
-  //    the enrich trigger. By this stage there's almost always a body or title,
-  //    so we land `ready`; `failed` is reserved for the truly-nothing case.
+  // 6. Guarded terminal write — WHERE id = :itemId AND status = 'fetched' so a
+  //    watchdog that already failed the row wins and we no-op. `ready` is
+  //    excluded so this write can't self-trigger the enrich drainer. By this
+  //    stage there's almost always a body or title, so we land `ready`;
+  //    `failed` is reserved for the truly-nothing case.
   const hasAnything = item.raw_content || item.name || aiResult;
   const finalStatus = hasAnything ? "ready" : "failed";
 
@@ -139,7 +139,7 @@ async function enrichItem(
       updated_at: new Date().toISOString(),
     })
     .eq("id", itemId)
-    .in("status", ENRICHABLE_STATUSES) // the guard
+    .eq("status", ENRICHABLE_STATUS) // the guard
     .select("id");
 
   if (updateError) {

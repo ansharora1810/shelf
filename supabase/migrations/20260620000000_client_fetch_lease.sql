@@ -4,7 +4,7 @@
 --
 -- The app claims a fetch_failed row by stamping dispatched_at (set-if-null) and
 -- bumping app_fetch_attempts in one atomic UPDATE, fetches the body, then writes
--- client_fetched (the status change auto-nulls dispatched_at via the existing
+-- fetched (the status change auto-nulls dispatched_at via the existing
 -- trigger). The set-if-null gate is the exclusion: a second pickup (remount,
 -- reordered realtime) hits dispatched_at already set and updates zero rows, so
 -- the fetch and the increment happen exactly once. A failed attempt leaves the
@@ -25,7 +25,7 @@ as $function$
      and status_changed_at < now() - interval '90 seconds';
 
   update public.items set status = 'failed'
-   where status in ('fetched','client_fetched')
+   where status = 'fetched'
      and status_changed_at < now() - interval '90 seconds';
 
   -- Release a stale client claim so the row is re-claimable; the count-gate below

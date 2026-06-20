@@ -29,7 +29,7 @@ export const DEBUG_PARSING = true;
 // Cross-runtime / SQL values — NOT importable from here; kept in sync by hand:
 //   • App attempt cap = 3 — app/src/constants/pipeline.ts MAX_APP_FETCH_ATTEMPTS
 //     AND shelf_watchdog `app_fetch_attempts >= 3`.
-//   • Watchdog deadlines: started / fetched / client_fetched → 90s;
-//     awaiting_upload → 3 min. pg_cron runs shelf_watchdog every 1 min.
-//   (all in supabase/migrations/20260619000000_client_assisted_fetch.sql)
+//   • Watchdog deadlines: started / fetched → 90s; awaiting_upload → 3 min.
+//     pg_cron runs shelf_watchdog every 1 min.
+//   (all in supabase/migrations/ — latest watchdog revision wins)
 // ---------------------------------------------------------------------------

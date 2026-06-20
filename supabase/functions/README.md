@@ -5,8 +5,10 @@ staged client-assisted fetch pipeline (PRD §11.1):
 
 ```
 create-item → [started] → fetch-item → [fetched]        → enrich-item → [ready]
-                                      → [fetch_failed] → app webview → [client_fetched] → enrich-item → [ready]
+                                      → [fetch_failed] → app webview → [fetched] → enrich-item → [ready]
 ```
+
+Both paths converge on `fetched`; residential-fetch provenance is captured by `app_fetch_attempts > 0`, not a distinct status.
 
 ## Functions
 
@@ -50,10 +52,10 @@ The AI stage. `verify_jwt = false`, `x-worker-secret`, service-role key — same
 
 **What it does:**
 1. Validates the `x-worker-secret` header.
-2. Loads the item by `item_id`; no-ops if `status not in ('fetched','client_fetched')` (zombie guard).
+2. Loads the item by `item_id`; no-ops if `status != 'fetched'` (zombie guard).
 3. Builds the prompt from `name`/title + `raw_content` + `url`; fetches the user's tag vocabulary (`get_user_tags`) to bias tag reuse.
 4. Calls Gemini 2.5 Flash-Lite once for structured `{ name, summary, tags[3..6] }` output.
-5. Writes the terminal state in a **single guarded update** (`WHERE id = ? AND status IN ('fetched','client_fetched')` — `ready` excluded so the write can't self-trigger):
+5. Writes the terminal state in a **single guarded update** (`WHERE id = ? AND status = 'fetched'` — `ready` excluded so the write can't self-trigger):
    - `status` → `ready` (or `failed` only if nothing usable at all)
    - `summary` — AI-owned, always written
    - `name` — kept if user-set / fetched, else AI name, else unchanged
@@ -112,7 +114,7 @@ Two AFTER triggers call the workers via `pg_net`, each reading the shared secret
 
 - `items_fire_worker` — `AFTER INSERT … WHEN (new.status = 'started' AND new.type = 'link')` →
   `shelf_fire_worker()` posts to `/functions/v1/fetch-item` with `mode='fetch'`.
-- `items_fire_enrich` — `AFTER UPDATE … WHEN (new.status IN ('fetched','client_fetched') AND
+- `items_fire_enrich` — `AFTER UPDATE … WHEN (new.status = 'fetched' AND
   old.status IS DISTINCT FROM new.status)` → `shelf_fire_enrich()` posts to `/functions/v1/enrich-item`
   with `mode='enrich'`. `ready` is excluded so enrich-item's own write can't self-trigger.
 

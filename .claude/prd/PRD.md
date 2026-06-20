@@ -154,7 +154,7 @@ The app should feel like a clean desk — calm, organised, never cluttered. Ever
 - Items grouped by week in descending order
 - Each week group: 2.5-column horizontal scroll row
 - Each card: thumbnail + name + source platform icon, plus a consume-time badge (clock icon + formatted `consume_time`, e.g. "12m") overlaid on the thumbnail. The badge is **hidden when `consume_time` is blank/`null`** — never render an empty pill.
-- Card reflects item `status` (§8.2): non-terminal (`started`/`fetched`/`fetch_failed`/`client_fetched`) → skeleton fill-in (non-clickable for file items until terminal), with a soft "taking a while…" hint after ~30–45s; `failed` → failure affordance (**v1: Remove**; **v2** adds **Try again** → reprocess); `ready` → normal card.
+- Card reflects item `status` (§8.2): non-terminal (`started`/`fetched`/`fetch_failed`) → skeleton fill-in (non-clickable for file items until terminal), with a soft "taking a while…" hint after ~30–45s; `failed` → failure affordance (**v1: Remove**; **v2** adds **Try again** → reprocess); `ready` → normal card.
 
 **Calendar / date filter:**
 - The `📅` icon opens a calendar bottom sheet; days that have saved items are marked
@@ -402,7 +402,7 @@ flowchart LR
 | `type` | No | `link` in v1; `image` / `pdf` reserved (deferred) |
 | `url` | No | The shared URL (link-kind items) — original, as received |
 | `normalized_url` | No | Canonicalised `url` used as the dedup key; `unique (user_id, normalized_url)` |
-| `status` | Derived | Staged lifecycle (§8.2). `awaiting_upload` (file uploads, v2) / `started` / `fetched` / `fetch_failed` / `client_fetched` / `ready` / `failed` |
+| `status` | Derived | Staged lifecycle (§8.2). `awaiting_upload` (file uploads, v2) / `started` / `fetched` / `fetch_failed` / `ready` / `failed` |
 | `status_changed_at` | Derived | Timestamp the row entered its current `status`; drives the watchdog's time-in-state deadlines (§8.2). Maintained by a trigger on every status change |
 | `dispatched_at` | Derived | Paced-dispatch claim marker (§8.2): set when a drainer dispatches the worker for the row's current stage, nulled on any status change. Orthogonal to `status` |
 | `app_fetch_attempts` | Derived | Count of client-assisted fetch attempts (§8.2); incremented by the app on pickup (claim-then-work), count-gated to `failed` by the watchdog |
@@ -445,11 +445,12 @@ Items are created optimistically and enriched asynchronously through a **staged 
 |---|---|---|
 | `awaiting_upload` | file uploads only (v2): row created, presigned URL issued, file not yet stored | storage event |
 | `started` | created, awaiting backend fetch | `fetch-item` |
-| `fetched` | backend obtained a usable body (`raw_content`) | `enrich-item` |
+| `fetched` | a usable body (`raw_content`) was obtained — either by the backend or by the app's residential-IP webview | `enrich-item` |
 | `fetch_failed` | backend fetch blocked (no body); awaiting the app's residential-IP fetch | app |
-| `client_fetched` | app fetched the body via a hidden webview | `enrich-item` |
 | `ready` | AI processing done — terminal success | — |
 | `failed` | terminal failure — nothing usable produced | — |
+
+Residential-fetch provenance is now encoded in `app_fetch_attempts` (> 0 means the app supplied the body), not a distinct status.
 
 - **Fetch criterion:** a row reaches `fetched` only if the backend got a usable **body** (`raw_content`); otherwise `fetch_failed`, even when a title/thumbnail were obtained (e.g. YouTube oEmbed yields title + thumbnail but no description). Whatever title/thumbnail/source the backend *did* get is persisted, so the app augments rather than starts blank.
 - "Complete" = any **terminal** state (`ready` / `failed`). The client stops watching a row once terminal.
@@ -460,13 +461,13 @@ Items are created optimistically and enriched asynchronously through a **staged 
 | From | To | Writer | Guard |
 |---|---|---|---|
 | `started` | `fetched` / `fetch_failed` | `fetch-item` | `WHERE status='started'` |
-| `fetch_failed` | `client_fetched` | app | claim `WHERE status='fetch_failed' AND dispatched_at IS NULL AND app_fetch_attempts < N` (set-if-null); write `WHERE status='fetch_failed'` |
+| `fetch_failed` | `fetched` | app | claim `WHERE status='fetch_failed' AND dispatched_at IS NULL AND app_fetch_attempts < N` (set-if-null); write `WHERE status='fetch_failed'` |
 | `fetch_failed` | `failed` | watchdog | `WHERE status='fetch_failed' AND app_fetch_attempts >= N` |
-| `fetched` / `client_fetched` | `ready` | `enrich-item` | `WHERE status IN ('fetched','client_fetched')` |
+| `fetched` | `ready` | `enrich-item` | `WHERE status = 'fetched'` |
 
-Each transition writes its **status and content in one `UPDATE`** (never status first, content second), so the enrich dispatch never sees a row whose content hasn't landed. The app **never** writes `failed` — it only fetches and writes `client_fetched`; finalizing an exhausted row is the watchdog's job. No fencing token is needed: one writer class per state, guarded CAS terminal writes, idempotent side-effects.
+Each transition writes its **status and content in one `UPDATE`** (never status first, content second), so the enrich dispatch never sees a row whose content hasn't landed. The app **never** writes `failed` — it only fetches and writes `fetched`; finalizing an exhausted row is the watchdog's job. No fencing token is needed: one writer class per state, guarded CAS terminal writes, idempotent side-effects.
 
-**Paced dispatch (no immediate-fire triggers).** Worker invocation is **rate-controlled**, not fired synchronously from the row write. The `items` table *is* the queue, partitioned by `status`: `started` = the fetch queue, `fetched`/`client_fetched` = the enrich queue. Two **pg_cron drainers** (one per stage, every 5s, each with its own concurrency cap `K`) pull from the table and dispatch — per tick:
+**Paced dispatch (no immediate-fire triggers).** Worker invocation is **rate-controlled**, not fired synchronously from the row write. The `items` table *is* the queue, partitioned by `status`: `started` = the fetch queue, `fetched` = the enrich queue. Two **pg_cron drainers** (one per stage, every 5s, each with its own concurrency cap `K`) pull from the table and dispatch — per tick:
 1. count `in_flight` = rows in the stage with `dispatched_at` set;
 2. if `in_flight ≥ K`, wait for the next tick;
 3. else claim up to `K − in_flight` undispatched rows (`… WHERE status=<stage> AND dispatched_at IS NULL ORDER BY created_at FOR UPDATE SKIP LOCKED`), set `dispatched_at = now()`, and fire `pg_net` to the worker for each.
@@ -487,7 +488,7 @@ Each transition writes its **status and content in one `UPDATE`** (never status 
 | State | Sweep rule |
 |---|---|
 | `started` | past the fetch deadline (90s) → `fetch_failed` (hand to the app; covers a dropped dispatch / hung fetcher — escalation, not a retry) |
-| `fetched` / `client_fetched` | past the Gemini deadline (90s) → `failed` (content discarded; **no worker retry in v1**) |
+| `fetched` | past the Gemini deadline (90s) → `failed` (content discarded; **no worker retry in v1**) |
 | `fetch_failed` (claimed) | `dispatched_at` older than the **lease** (45s, > the client fetch timeout) → null `dispatched_at` (release the stale client claim so the app re-claims; the realtime push drives the retry) |
 | `fetch_failed` | `app_fetch_attempts >= N` → `failed` (the dead-letter step; only finalizes rows the app has exhausted) |
 | `awaiting_upload` | past 3 min → `failed` (abandoned upload, v2) |
@@ -497,7 +498,7 @@ The watchdog is the **only** recovery for a dropped/crashed claim (there is no s
 **Client-assisted fetch — claim via `dispatched_at` (the attempt cap).** `dispatched_at` is the **single claim marker for the client stage too** — the same one the backend drainers use. On a `fetch_failed` row the app fetches the body on its residential IP via a hidden, **logged-out** `WKWebView` (per-source recipes in §8.4):
 - the app selects `fetch_failed` rows `WHERE app_fetch_attempts < N`;
 - it **claims** with one atomic `UPDATE … SET dispatched_at = now(), app_fetch_attempts = app_fetch_attempts + 1 WHERE status='fetch_failed' AND dispatched_at IS NULL AND app_fetch_attempts < N`. The **set-if-null gate is the exclusion** — a second pickup (provider remount, reordered realtime, duplicate effect) updates zero rows, so the fetch *and* the increment happen exactly once. The increment lands with the claim, so a crash mid-fetch still advances the count;
-- success → `client_fetched` + content in a single `UPDATE … WHERE status='fetch_failed'`; the status change **auto-nulls `dispatched_at`** (trigger), freeing the row for the enrich drainer;
+- success → `fetched` + content in a single `UPDATE … WHERE status='fetch_failed'`; the status change **auto-nulls `dispatched_at`** (trigger), freeing the row for the enrich drainer;
 - a failed/crashed attempt **leaves the claim in place**; the watchdog releases it after the lease (above), re-exposing it via realtime for the next attempt;
 - once `app_fetch_attempts >= N`, the count-gated watchdog finalizes the row `failed`. Total client attempts are bounded at `N` (same shape as SQS `maxReceiveCount` → DLQ).
 
@@ -509,17 +510,16 @@ The worker writes **AI-owned fields only** (`name`/`summary` when unset, and **u
 - **Retry (`POST /items/:id/reprocess`) is v2** (§8.7) — a dedicated endpoint (guarded `failed → started`, resets the clock), not create (which mints a new id and would duplicate), capped (default 2, tunable). **v1:** a failed URL item offers **Remove** only — the client-assisted path is the in-band recovery for a blocked fetch.
 
 **Client states on a card / detail:**
-- `started` / `fetched` / `client_fetched`: skeleton fill-in for the not-yet-arrived fields; a soft "taking a while…" hint after ~30–45s (cosmetic only — never a failure verdict or destructive action).
+- `started` / `fetched`: skeleton fill-in for the not-yet-arrived fields; a soft "taking a while…" hint after ~30–45s (cosmetic only — never a failure verdict or destructive action).
 - `fetch_failed`: the app's webview fetch runs (claim-then-work); to the user it still reads as in-progress.
 - `ready`: normal item.
 - `failed`: a failure affordance — **v1: Remove**; **v2** adds **Try again** (calls reprocess, up to the cap) before Remove.
 
 **Open / hardening (tracked, not blocking v1):**
-- **Securing the app's direct DB writes.** The app must write `raw_content` (it's the fetch source), so the write can't be blocked outright. A `SECURITY DEFINER` RPC should constrain it — permit only `fetch_failed → client_fetched`, restrict writable columns to `raw_content`/`status`/`app_fetch_attempts`, and **bound `raw_content` size** to cap Gemini cost. RLS scopes abuse to the user's own rows for now; prioritise when paid tiers land or Gemini spend needs protecting.
+- **Securing the app's direct DB writes.** The app must write `raw_content` (it's the fetch source), so the write can't be blocked outright. A `SECURITY DEFINER` RPC should constrain it — permit only `fetch_failed → fetched`, restrict writable columns to `raw_content`/`status`/`app_fetch_attempts`, and **bound `raw_content` size** to cap Gemini cost. RLS scopes abuse to the user's own rows for now; prioritise when paid tiers land or Gemini spend needs protecting.
 - **Watchdog vs. in-flight final attempt (race).** Claim-then-work makes a row count-gate-eligible at the *start* of its Nth attempt, so a sweep landing mid-fetch can finalize a still-fetchable row (last attempt only). Accept (rare; user re-adds) or add a `last_app_attempt_at` staleness gate to the finalize.
 - **`dispatched_at` slot leak vs. `in_flight` precision.** A dropped invocation holds a slot until the watchdog ages the row out, under-utilising `K`. Add a short dispatch lease only if this throttling proves real (it's a visibility timeout by another name, deliberately excluded).
 - **Tuning:** the client attempt cap `N`, the per-state deadlines, and `K` per stage.
-- **enrich drainer ordering:** could prioritise `client_fetched` (a user is actively waiting) over `fetched` — cosmetic.
 - **Expiring thumbnails:** CDN-signed `og:image` (Reddit `preview.redd.it`, backend Instagram) 404s after hours. v1 accepts staleness; v2 rehosts to Supabase Storage at fetch time. (Client-path Instagram is already durable via the tokenless `/media/` redirect.)
 - **pgmq upgrade seam:** swap table-as-queue for pgmq if true multi-consumer, replay, or queue-depth metrics are ever needed (§8.9).
 
@@ -567,7 +567,7 @@ URL handling uses standard libraries — `normalize-url` (canonicalize, add sche
 
 **AI tagging:**
 - One **Gemini 2.5 Flash-Lite** call per saved item, run by **`enrich-item`** → `name`, `summary`, `tags` (a single structured-output call). `consume_time` is derived non-AI (§8.4). Dirt cheap — fractions of a cent per item. (Embedding generation is **v2**, OpenAI `text-embedding-3-small` — §8.6.)
-- **Always async** across every entry point (manual add, share, file). `enrich-item` generates the fields once the body is in (`fetched` / `client_fetched`, §8.2); they stream into the item via Realtime. The user adds their own tags later on the item detail screen (§6.4); the AI tags **union** in when ready, never clobbering user tags.
+- **Always async** across every entry point (manual add, share, file). `enrich-item` generates the fields once the body is in (`fetched`, §8.2); they stream into the item via Realtime. The user adds their own tags later on the item detail screen (§6.4); the AI tags **union** in when ready, never clobbering user tags.
 
 **Reminders:** v1 stores the per-item `reminder_enabled` toggle only. Scheduling and delivery (local notification vs server push) are **v2** — nothing fires a notification in v1.
 
@@ -622,13 +622,13 @@ Synchronous failures of `POST /items` (create) and of the direct upload PUT are 
 
 Both kinds of item — URL (v1) and file (v2, deferred) — share one staged pipeline and the §8.2 lifecycle (optimistic create at `started` → fetch → enrich → terminal, with Realtime fill-in, the per-state watchdog, paced dispatch, and v2 reprocess). They differ only in how the content reaches the backend.
 
-**Dispatch is paced and decoupled from any single source (§8.2).** Work is **not** fired synchronously from the row write. The `items` table is the queue, partitioned by `status`, and two pg_cron drainers dispatch the stage workers (`fetch-item` for `started`, `enrich-item` for `fetched`/`client_fetched`) via **pg_net** at a bounded rate. The workers are source-agnostic and read whatever the row points at (the URL for links; the storage object for files in v2). This is what lets retry re-enter the pipeline without a re-upload. (No queue table in v1 — see §8.9 for the table-as-queue vs pgmq trade-off and upgrade path.)
+**Dispatch is paced and decoupled from any single source (§8.2).** Work is **not** fired synchronously from the row write. The `items` table is the queue, partitioned by `status`, and two pg_cron drainers dispatch the stage workers (`fetch-item` for `started`, `enrich-item` for `fetched`) via **pg_net** at a bounded rate. The workers are source-agnostic and read whatever the row points at (the URL for links; the storage object for files in v2). This is what lets retry re-enter the pipeline without a re-upload. (No queue table in v1 — see §8.9 for the table-as-queue vs pgmq trade-off and upgrade path.)
 
 **URL item — in-app manual add (v1):**
 1. App `POST /items { url, project_id? }`. Backend normalizes → dedups (§8.3) → inserts the row at `started` (best-effort `source`, **no network**) → returns it. Create error → "try again" (nothing enters the feed).
 2. The single-phase add-link sheet (§6.3) dismisses immediately; the card appears in the feed at `started` (everything in skeleton). No `PUT` — name/tags/etc. are edited later on the detail screen.
 3. `fetch-item` (dispatched by the fetch drainer): parse content → write `fetched` + `raw_content`, or `fetch_failed` if the body is IP-walled (handing it to the app's client-assisted fetch, §8.2).
-4. `enrich-item` (dispatched by the enrich drainer once `fetched`/`client_fetched`): one grounded Gemini call → AI `name`/`tags`/`summary` → guarded terminal write to `ready` (or `failed`). (Embedding is added here in v2 — §8.6.)
+4. `enrich-item` (dispatched by the enrich drainer once `fetched`): one grounded Gemini call → AI `name`/`tags`/`summary` → guarded terminal write to `ready` (or `failed`). (Embedding is added here in v2 — §8.6.)
 5. Realtime pushes each transition; the app fills in (or runs the webview fetch on `fetch_failed`, or shows the failure affordance). Foreground/reconnect GET is the safety net.
 
 **URL item — share extension (v1):** same backend path, but the extension `POST /items` after the optional-project step and dismisses — no popup, no `PUT`; the item enters the feed and fills in via Realtime / next fetch (§6.10).
@@ -668,7 +668,7 @@ Guiding constraint: **no users yet, slow scale → no ever-running infra, on-tri
 
 **Worker functions** (each dispatched by its drainer with `{ item_id, mode }` in the pg_net payload):
 - `fetch-item` / `mode: 'fetch'` (**v1**) — fetch the body only, no Gemini: `started → fetched` (usable body) | `fetch_failed` (IP-walled, handed to the app). §8.2/§8.4.
-- `enrich-item` / `mode: 'enrich'` (**v1**) — one grounded Gemini call over the body → `name`/`summary`/`tags`: `fetched`/`client_fetched → ready`. (Embedding generation is appended here in v2 — §8.6.)
+- `enrich-item` / `mode: 'enrich'` (**v1**) — one grounded Gemini call over the body → `name`/`summary`/`tags`: `fetched → ready`. (Embedding generation is appended here in v2 — §8.6.)
 - `reembed` (**v2**) — embed-only: read `raw_content` + current `name`/`tags`, regenerate just the `embedding` column. Triggered by a user name/tag edit (§8.6), guarded so the worker's own write doesn't self-trigger. Ships with semantic search.
 
 **Cold-start caveat:** `POST /items` does a live OG-tag fetch under a ~1.5s timeout; a Lambda cold start (~1–2s) on top could occasionally exceed the 2s feel. Tolerable solo; if needed, move only `create` to a fast-cold-start Deno edge function (one TS file) while the worker stays Python.
@@ -742,8 +742,8 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 |---|---|---|
 | Optimistic create: `POST /items` inserts at `started` and returns immediately — a DB-only op (normalize → dedup → insert), **no network**; all enrichment (incl. non-AI fields) is async in the workers | User never waits; item shows instantly; create stays sub-100ms | §8.2 |
 | Endpoints — **v1:** `POST /items` create (one endpoint, body branches link vs file) + `PUT /items/:id` update (direct+RLS). **v2:** `POST /items/:id/reprocess`, `POST /search` | One create endpoint for both kinds; create/update separated; POST (not GET) since create writes a row | §8.7 |
-| Staged `status`: `awaiting_upload` (files) → `started` → `fetched`/`fetch_failed` → `client_fetched` → terminal `ready`/`failed`; no `partial` | Splits fetch from AI and routes IP-walled bodies to the client; enrichment degrades to `ready`, `failed` = nothing usable | §8.2 |
-| **Client-assisted fetch:** on `fetch_failed` the app fetches the body via a hidden logged-out `WKWebView` (residential IP) → `client_fetched`; claim-then-work cap `N`, watchdog finalizes exhausted rows | The datacenter IP can't reach YouTube/IG/Reddit bodies; the phone can. Claim-on-pickup bounds retries even across crashes; the app never writes `failed` | §8.2, §8.4 |
+| Staged `status`: `awaiting_upload` (files) → `started` → `fetched`/`fetch_failed` → terminal `ready`/`failed`; no `partial` | Splits fetch from AI and routes IP-walled bodies to the client; enrichment degrades to `ready`, `failed` = nothing usable | §8.2 |
+| **Client-assisted fetch:** on `fetch_failed` the app fetches the body via a hidden logged-out `WKWebView` (residential IP) → `fetched`; claim-then-work cap `N`, watchdog finalizes exhausted rows | The datacenter IP can't reach YouTube/IG/Reddit bodies; the phone can. Claim-on-pickup bounds retries even across crashes; the app never writes `failed` | §8.2, §8.4 |
 | Supabase Realtime is the only live-update mechanism (no polling); reconcile GETs (incl. on Realtime re-subscribe) are the safety net | Instant fill-in without a polling loop; reconcile covers any missed push | §8.2 |
 | Backend owns failure via a **per-state** watchdog (each deadline > that stage's P99; `fetch_failed` is count-gated); client never declares failure on a timer | Avoids client/backend split-brain; bounds each stage's skeleton; tighter than one global deadline | §8.2 |
 | No attempt/fencing token; guarded CAS terminal writes (`WHERE status IN (<source states>)`); time-in-state via `status_changed_at` | One writer class per state + guarded CAS + idempotent side-effects make a token unnecessary; accepts a slow zombie's valid result winning | §8.2 |
@@ -818,7 +818,7 @@ _Snapshot: 2026-06-20. Real Supabase data layer (direct client + RLS, Realtime f
 | Workers (`fetch-item` + `enrich-item`, Edge/Deno) | ✅ Done | **Split staged pipeline** (§8.2): `fetch-item` runs the OOP parsers (oEmbed/IG-GraphQL/Reddit/website) → body or `fetch_failed`; `enrich-item` runs the grounded Gemini call → name/summary/tags; guarded CAS writes. Deployed `verify_jwt=false`, dispatched by the paced drainers; per-state pg_cron watchdog live |
 | Paced dispatch (pg_cron drainers) | ✅ Done | Two 5s drainers over the items-table-as-queue + hourly cron-log prune replace the immediate-fire triggers; `dispatched_at` claim (FOR UPDATE SKIP LOCKED), `K=1` per stage; verified firing live (§8.2/§8.9) |
 | Client-assisted fetch | 🟡 Partial | Backend staged states + guarded CAS transitions + per-state/count-gated watchdog live; app picks up `fetch_failed` (foreground interval). Per-source webview recipes (§8.4) are the remaining wiring |
-| Optimistic create + staged lifecycle | ✅ Done | Staged `status` live (`started`→`fetched`/`fetch_failed`→`client_fetched`→`ready`/`failed`); create returns at `started`; per-state watchdog bounds each stage (§8.2) |
+| Optimistic create + staged lifecycle | ✅ Done | Staged `status` live (`started`→`fetched`/`fetch_failed`→`ready`/`failed`); create returns at `started`; per-state watchdog bounds each stage (§8.2) |
 | Realtime fill-in | ✅ Done | Realtime channel on `items`/`projects`; reconcile GETs on session/foreground/re-subscribe, no polling (§8.2) |
 | Per-user dedup | ✅ Done | partial `unique (user_id, normalized_url)`; idempotent create returns `{deduped}`; conservative normalisation (§8.3) |
 | AI tagging (name/summary/tags) | ✅ Done | Worker Gemini 2.5 Flash-Lite structured call, active. Grounded prompt (only non-empty signals; URL-based generic summary when title/content absent) to avoid hallucination (§8.5) |

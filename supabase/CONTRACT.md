@@ -10,7 +10,7 @@ DB types: `app/src/lib/database.types.ts`. PRD: `.claude/prd/PRD.md`.
 `user_id` defaults to `auth.uid()` — direct-client and JWT-context inserts never pass it.
 
 `items` columns: `id, user_id, type('link'|'image'|'pdf', default 'link'), url, normalized_url,
-status('awaiting_upload'|'started'|'fetched'|'fetch_failed'|'client_fetched'|'ready'|'failed', default 'started'),
+status('awaiting_upload'|'started'|'fetched'|'fetch_failed'|'ready'|'failed', default 'started'),
 status_changed_at, dispatched_at(timestamptz, nullable), app_fetch_attempts(int default 0), raw_content, name,
 tags(text[] default {}), summary, thumbnail_url, consume_time(int seconds, nullable),
 project_id(fk→projects, on delete set null), reminder_enabled(bool default false),
@@ -18,10 +18,11 @@ source('youtube'|'instagram'|'website'), created_at, updated_at`.
 
 The staged-pipeline lifecycle (PRD §11.1) supersedes the single-stage `processing → ready/failed`:
 `started` (created, awaiting backend fetch) → `fetch-item` → `fetched` (body obtained) **or**
-`fetch_failed` (no body — the app fetches via webview on its residential IP) → `client_fetched` →
+`fetch_failed` (no body — the app fetches via webview on its residential IP) → `fetched` →
 `enrich-item` (one Gemini call over the body) → `ready`. `failed` is terminal. The app **never** writes
 `failed`: on a `fetch_failed` row it increments `app_fetch_attempts` (claim-then-work) then, on success,
-atomically writes `status='client_fetched'` + `raw_content`; the watchdog finalizes exhausted rows.
+atomically writes `status='fetched'` + `raw_content`; the watchdog finalizes exhausted rows.
+Residential-fetch provenance is encoded in `app_fetch_attempts` (> 0), not a distinct status.
 
 `projects` columns: `id, user_id, name(1–20 chars), created_at, updated_at`.
 
@@ -36,7 +37,7 @@ atomically writes `status='client_fetched'` + `raw_content`; the watchdog finali
   `app_fetch_attempts` increment doesn't change status, so it doesn't bump either; deadlines measure
   true time-in-state.
 - **Dispatch is paced, not trigger-fired (PRD §11.2).** The `items` table *is* the queue, partitioned
-  by `status`: `started` = fetch queue, `fetched`/`client_fetched` = enrich queue. Two pg_cron drainers
+  by `status`: `started` = fetch queue, `fetched` = enrich queue. Two pg_cron drainers
   (`shelf-drain-fetch`, `shelf-drain-enrich`, every 5s) replace the old immediate-fire triggers: each
   counts in-flight rows (`dispatched_at IS NOT NULL`) for its stage, and while below its cap `K` claims
   undispatched rows (`FOR UPDATE SKIP LOCKED`), stamps `dispatched_at = now()`, and fires the worker via
@@ -46,7 +47,7 @@ atomically writes `status='client_fetched'` + `raw_content`; the watchdog finali
 - Watchdog `shelf_watchdog()` runs every minute via pg_cron (PRD §11.1), keyed on `status` only —
   unchanged by §11.2 (`dispatched_at` doesn't reset any deadline; queue-wait counts against the budget):
   - `started` past 90s (time-in-state) → `fetch_failed`
-  - `fetched`/`client_fetched` past 90s (time-in-state) → `failed`
+  - `fetched` past 90s (time-in-state) → `failed`
   - `fetch_failed` with `app_fetch_attempts >= 3` → `failed` (**count-gated, no time predicate**)
   - `awaiting_upload` past 3 min → `failed`
 
@@ -116,22 +117,22 @@ auto-injected) — bypasses RLS; scope every write by `item_id`.
 
 The `fetched` write lands the row in the enrich queue; the `shelf-drain-enrich` drainer claims it (≤5s)
 and fires `enrich-item` via pg_net (PRD §11.2 — no update trigger). A `fetch_failed` row is handed to
-the app (Realtime push + reconcile GETs) to fetch the body on its residential IP, then `client_fetched`.
+the app (Realtime push + reconcile GETs) to fetch the body on its residential IP, then writes `fetched`.
 
 ## Edge function: `enrich-item` (AI stage, `mode='enrich'`)
 
-Invoked by the `shelf-drain-enrich` pg_cron drainer via pg_net when a row sits in `fetched`/`client_fetched` (PRD §11.2):
+Invoked by the `shelf-drain-enrich` pg_cron drainer via pg_net when a row sits in `fetched` (PRD §11.2):
 **`POST { item_id: string, mode: 'enrich' }`**. Same scaffolding (`verify_jwt = false`,
 `x-worker-secret`, service-role key, always-200).
 
 **Behavior:**
-1. Load row by `item_id`. If `status not in ('fetched','client_fetched')`, no-op.
+1. Load row by `item_id`. If `status != 'fetched'`, no-op.
 2. Build the prompt from `name`/title + `raw_content` + `url`. Fetch the user's tag vocabulary
    (`get_user_tags`) and bias the model toward reuse.
 3. One **Gemini 2.5 Flash-Lite** structured-output call → `{ name, summary, tags[] }` (3–6 tags,
    each kebab-case with a leading `#`). Key in env `GEMINI_API_KEY`.
-4. **Guarded terminal write** — `UPDATE items SET … WHERE id = :item_id AND status IN
-   ('fetched','client_fetched')` (`ready` excluded so this write can't self-trigger the enrich kick):
+4. **Guarded terminal write** — `UPDATE items SET … WHERE id = :item_id AND status = 'fetched'`
+   (`ready` excluded so this write can't self-trigger the enrich kick):
    - `status` = `'ready'` (`failed` reserved for the truly-nothing case — by this stage there's
      almost always a body or title)
    - `summary` = AI summary (AI-owned)
@@ -149,9 +150,9 @@ The frontend's `Link`/`Item` type maps DB snake_case → camelCase. Key changes 
   `descriptor`/`title` split anywhere.
 - **`consumeTime` is `number | null` (seconds).** A client-side `formatConsumeTime(seconds)` produces
   the badge label (e.g. 720 → "12m", 3720 → "1h 2m"). Badge hidden when null/0.
-- `status: ItemStatus` drives card state: `started`/`fetched`/`client_fetched` → skeleton fill-in;
+- `status: ItemStatus` drives card state: `started`/`fetched` → skeleton fill-in;
   `fetch_failed` → the app fetches the body via its hidden webview (claim-then-work: increment
-  `app_fetch_attempts` first, then atomically write `client_fetched` + `raw_content` on success);
+  `app_fetch_attempts` first, then atomically write `fetched` + `raw_content` on success);
   `failed` → Remove affordance (v1, no retry); `ready` → normal.
 - `savedAt` ← `created_at`. `reminderEnabled` ← `reminder_enabled`. `thumbnail` ← `thumbnail_url`.
   `projectId` ← `project_id`.
