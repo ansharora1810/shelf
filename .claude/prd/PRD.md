@@ -858,3 +858,51 @@ Schema deltas this implies:
 2. **Tuning:** the client attempt cap `N`, and the per-state watchdog deadlines. Splitting fetch from Gemini lets each get its own deadline above its stage's P99 — tighter than today's single 120s.
 3. **Watchdog vs. in-flight final attempt (race).** Because the app increments *before* fetching (claim-then-work), a row becomes count-gate-eligible (`>= N`) at the **start** of its Nth attempt. If the cron sweep lands during that fetch, the watchdog sets `failed` and the app's (successful) Nth `client_fetched` write then no-ops on its `WHERE status='fetch_failed'` guard — a fetchable item is lost. The window is only the final attempt (rows at `count < N` never match the count gate). This is the same no-fencing-token trade-off as §8.2. **Decide:** accept it (rare, last attempt only, user can Remove + re-add), or add a small staleness gate to the finalize — `AND last_app_attempt_at < now() - grace` (grace > max webview fetch), which needs a `last_app_attempt_at` column set on each claim so the watchdog won't finalize a row the app is actively working.
 4. **Expiring thumbnails.** CDN-signed `og:image` URLs carry time-limited tokens and 404 after hours — affects **Reddit** (`preview.redd.it`) and the backend **Instagram GraphQL** thumbnail. Instagram (client path) is already solved via the tokenless `/p/<shortcode>/media/?size=l` redirect; there's no clean equivalent for the others. v1 accepts stale-image risk; v2 fix is to **rehost the thumbnail to Supabase Storage at fetch time** (or proxy + re-sign) so the stored URL is durable.
+
+### 11.2 Paced dispatch — concurrency-bounded worker invocation
+
+**What we're solving for.** Today the pipeline triggers fire the workers **immediately** via `pg_net` (an `AFTER INSERT` kick to `fetch-item`, an `AFTER UPDATE` kick to `enrich-item`, §11.1). Each save (or each fetch→enrich handoff) becomes a synchronous, uncontrolled HTTP invocation. There is **no back-pressure**: a burst of concurrent saves produces a burst of concurrent invocations, and once the Edge Function concurrency ceiling is hit the surplus invocations are **rejected and silently dropped** — `pg_net` is fire-and-forget and nobody reads `net._http_response`. The dropped item then sits untouched until the watchdog ages it out (90s, §11.1). So past a handful of concurrent operations the app doesn't slow down — it **fails**. This bounds real throughput to roughly the Edge concurrency limit (single digits on the free tier).
+
+The fix: stop firing invocations from the triggers. Buffer the work and dispatch it at a **controlled rate** that never exceeds what the workers can absorb. Surplus waits durably instead of being dropped.
+
+**Key reframe — the `items` table is already the queue.** A queue is a durable list of work waiting to be claimed; `items` keyed by `status` is exactly that, and `status` already partitions it into the two queues the two worker types need:
+
+| Logical queue | Rows | Worker |
+|---|---|---|
+| fetch | `status = 'started'` | `fetch-item` |
+| enrich | `status IN ('fetched', 'client_fetched')` | `enrich-item` |
+
+One row per item (the create constraint) gives dedup for free, and the watchdog already operates over these states. **No pgmq, no separate queue, no daemon/long-poll consumer** — a persistent consumer would be always-on compute, the exact ever-running cost the stack avoids (§8.9), and Edge Functions are invocation-scoped and can't be daemons anyway. The workers stay **stateless HTTP functions, unchanged in shape**.
+
+**Design — drainer per worker type.** Replace the immediate-fire triggers with **pg_cron drainers** that pull from the table and pace dispatch.
+
+- **Remove** the two fire triggers (`items_fire_worker` on insert, `items_fire_enrich` on update). The `status_changed_at` trigger stays.
+- **Two drainers**, one per stage, each on a **sub-minute** pg_cron schedule, each with its own concurrency cap **`K`**. Per tick:
+  1. `in_flight = count(rows in this stage with dispatched_at set)`
+  2. if `in_flight >= K`: do nothing (wait for the next tick)
+  3. else claim up to `K − in_flight` undispatched rows — `… WHERE status = <stage> AND dispatched_at IS NULL ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT (K − in_flight)` — set `dispatched_at = now()`, and fire `pg_net` to the worker for each claimed row (same payload as today).
+- **`FOR UPDATE SKIP LOCKED`** makes the claim safe under overlapping ticks or multiple drainers: a row another tick already locked is skipped, not waited on — no double-dispatch, no blocking.
+- **`K` is per-stage and independent.** `K = min(edge concurrency ceiling, the stage's own bottleneck)`. `fetch-item` is I/O-bound (external sites, oEmbed, IG GraphQL) — mostly waiting, tolerates a higher `K`. `enrich-item`'s binding constraint is usually the **Gemini rate limit**, not Edge concurrency. Surplus beyond `K` simply waits in `started` / `fetched`.
+
+**New column — `dispatched_at timestamptz` (orthogonal to `status`, not a status value).**
+- Set by the drainer when it claims a row; means "an invocation for the row's *current* stage is in flight."
+- **Cleared automatically on any status change**, folded into the existing `shelf_touch_status_changed_at` trigger (the same condition that bumps `status_changed_at` also nulls `dispatched_at`). So `dispatched_at` is always scoped to the current status, and neither the worker nor the watchdog has to clear it by hand. The drainer's claim sets it *without* changing `status`, so the trigger doesn't clobber it.
+
+**Watchdog — unchanged in shape (Option A).** The watchdog still keys on `status` only (§11.1 rules intact). Because `dispatched_at` touches neither `status` nor `status_changed_at`, the time-in-state clocks run **continuously from state entry** — claiming a row does **not** reset its deadline. This is deliberate: the entire backend is one processing unit and the clock starts when the user saved, so queue-wait + dispatch + processing all count against the one budget. The watchdog also remains the **only** safety net for a dropped/crashed invocation — there is no visibility timeout (a dropped invocation leaves `dispatched_at` set but `status` unchanged; the row never re-dispatches and instead ages out via its existing per-state rule).
+
+**Trade-offs (accepted):**
+
+| Trade-off | Detail | Why accepted |
+|---|---|---|
+| **Dispatch latency** | A freshly-eligible row waits up to one cron interval (avg ½ interval) before dispatch, vs. the old ~zero-latency fire. | The price of concurrency control. Keep the interval sub-minute (well under the 90s watchdog) so it's a small fraction of the budget. Requires pg_cron sub-minute scheduling (≥ 1.5) — **verify on the live project** before relying on it. |
+| **Stuck `dispatched_at` occupies a slot** | A dropped/crashed invocation leaves `dispatched_at` set; that row counts against `in_flight` (throttling the drainer) until the watchdog ages the row out of its state. | Bounded by the watchdog deadline, and it's arguably correct back-pressure: if invocations are being dropped, throttling is the right reaction. Avoids reintroducing a visibility-timeout/lease mechanism. |
+| **No retry of a dropped invocation** | A dropped fetch ages `started → fetch_failed` (handed to the client path); a dropped enrich ages `fetched → failed` (terminal, content discarded). | Consistent with §11.1's "no worker retries in v1." The client path is the natural recovery for fetch; enrich failure is terminal as designed. |
+
+This is the foundation only — it makes throughput **degrade gracefully (queue and wait) instead of failing (drop)** under concurrency, without adding infra. It is **not** auto-scaling: raising real throughput still means raising `K` (and the underlying Edge/Gemini limits) or adding worker capacity. With `K` ≈ the current ceiling and at single-user volume the behaviour is unchanged; the win is purely what happens under burst.
+
+#### Still in progress
+
+1. **`K` values and cron interval.** Pick `K_fetch` / `K_enrich` against the actual Edge concurrency ceiling and Gemini rate limit; pick the drainer interval (sub-minute) against the 90s watchdog budget. Confirm Supabase's pg_cron supports sub-minute schedules on this project.
+2. **`in_flight` accounting precision vs. the `dispatched_at` slot leak.** The stuck-slot trade-off above means `in_flight` can over-count under failure, under-utilising `K`. If that bites, the minimal fix is a short **dispatch lease** (`dispatched_at < now() - lease` → reclaimable) — but that is a visibility timeout by another name and was deliberately excluded; only add it if slot-leak throttling proves real.
+3. **Whether the enrich drainer should prioritise `client_fetched` over `fetched`.** A `client_fetched` row has a user who just reopened the app and is actively waiting; a `fetched` row is mid-backend-pipeline. `ORDER BY` could favour `client_fetched` for perceived latency. Cosmetic; revisit if it matters.
+4. **pgmq upgrade seam.** If true multi-consumer, archival/replay, or queue-depth metrics are ever needed, swap the table-as-queue for **pgmq**: the drainer reads from pgmq instead of `… WHERE status = <stage>`, the trigger `pgmq.send`s instead of being removed, and the worker is unchanged. Deferred — at this scale it only adds a dual-write (row + message) consistency burden for no gain (§8.9).
