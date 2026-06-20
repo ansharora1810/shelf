@@ -4,6 +4,8 @@
 // consume-time estimate used for AI tagging. The title is a best-effort
 // fallback; the AI-generated name takes precedence when available.
 
+import { Logger } from "../log.ts";
+
 export interface FullContent {
   title: string | null;
   rawContent: string | null;
@@ -12,5 +14,5 @@ export interface FullContent {
 }
 
 export interface Parser {
-  fetchContent(url: string): Promise<FullContent>;
+  fetchContent(url: string, log?: Logger): Promise<FullContent>;
 }

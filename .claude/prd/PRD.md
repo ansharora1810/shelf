@@ -460,7 +460,7 @@ Items are created optimistically and enriched asynchronously through a **staged 
 | From | To | Writer | Guard |
 |---|---|---|---|
 | `started` | `fetched` / `fetch_failed` | `fetch-item` | `WHERE status='started'` |
-| `fetch_failed` | `client_fetched` | app | `WHERE status='fetch_failed' AND app_fetch_attempts < N` |
+| `fetch_failed` | `client_fetched` | app | claim `WHERE status='fetch_failed' AND dispatched_at IS NULL AND app_fetch_attempts < N` (set-if-null); write `WHERE status='fetch_failed'` |
 | `fetch_failed` | `failed` | watchdog | `WHERE status='fetch_failed' AND app_fetch_attempts >= N` |
 | `fetched` / `client_fetched` | `ready` | `enrich-item` | `WHERE status IN ('fetched','client_fetched')` |
 
@@ -482,22 +482,26 @@ Each transition writes its **status and content in one `UPDATE`** (never status 
 - No background work when the app isn't foregrounded; the next reconcile fetch catches up.
 - Data fetching is **gated on session** and re-run on logout→login.
 
-**Watchdog — the backend owns failure, never the client.** The client only *reflects* a backend status; it never declares failure on a timer (that would split-brain a backend that succeeds late). A **pg_cron** sweep (every minute) enforces per-state deadlines — time-gated rules measure **time-in-state** via `status_changed_at`; the `fetch_failed` rule is **count-gated** (no time component, so an offline app's rows can wait indefinitely):
+**Watchdog — the backend owns failure, never the client.** The client only *reflects* a backend status; it never declares failure on a timer (that would split-brain a backend that succeeds late). A **pg_cron** sweep (every minute) enforces per-state deadlines — time-gated rules measure **time-in-state** via `status_changed_at`; the `fetch_failed` count-gate has no time component (so an offline app's rows can wait indefinitely); the **client-claim lease** is time-gated on `dispatched_at`:
 
 | State | Sweep rule |
 |---|---|
 | `started` | past the fetch deadline (90s) → `fetch_failed` (hand to the app; covers a dropped dispatch / hung fetcher — escalation, not a retry) |
 | `fetched` / `client_fetched` | past the Gemini deadline (90s) → `failed` (content discarded; **no worker retry in v1**) |
+| `fetch_failed` (claimed) | `dispatched_at` older than the **lease** (45s, > the client fetch timeout) → null `dispatched_at` (release the stale client claim so the app re-claims; the realtime push drives the retry) |
 | `fetch_failed` | `app_fetch_attempts >= N` → `failed` (the dead-letter step; only finalizes rows the app has exhausted) |
 | `awaiting_upload` | past 3 min → `failed` (abandoned upload, v2) |
 
-The watchdog is also the **only** recovery for a dropped/crashed dispatch (there is no visibility timeout): a dropped invocation leaves `dispatched_at` set but `status` unchanged, and the row ages out via its per-state rule. Deadlines sit **above each stage's P99** — splitting fetch from Gemini lets each take a tighter deadline than the old single-stage 120s. (If pgmq is added later, its visibility-timeout/DLQ can take over this role — §8.9.)
+The watchdog is the **only** recovery for a dropped/crashed claim (there is no separate visibility timeout): a dropped *backend* dispatch leaves `dispatched_at` set with `status` unchanged and ages out via its per-state rule; a failed/crashed *client* fetch leaves the client claim set and is released by the lease rule above — the same `dispatched_at` mechanism on both sides. Deadlines sit **above each stage's P99** — splitting fetch from Gemini lets each take a tighter deadline than the old single-stage 120s. (If pgmq is added later, its visibility-timeout/DLQ can take over this role — §8.9.)
 
-**Client-assisted fetch — claim-then-work (the attempt cap).** On a `fetch_failed` row the app fetches the body on its residential IP via a hidden, **logged-out** `WKWebView` (per-source recipes in §8.4), then atomically writes `client_fetched` + `raw_content`. To bound retries it records progress on **pickup**, not completion:
+**Client-assisted fetch — claim via `dispatched_at` (the attempt cap).** `dispatched_at` is the **single claim marker for the client stage too** — the same one the backend drainers use. On a `fetch_failed` row the app fetches the body on its residential IP via a hidden, **logged-out** `WKWebView` (per-source recipes in §8.4):
 - the app selects `fetch_failed` rows `WHERE app_fetch_attempts < N`;
-- it **increments `app_fetch_attempts` before** starting the fetch (a crash mid-fetch still advances the count);
-- success → `client_fetched` + content in a single atomic update; a failed attempt leaves the row at `fetch_failed` with the count already bumped, for a later retry;
-- once `app_fetch_attempts >= N`, the count-gated watchdog finalizes the row `failed`. Total client attempts are bounded at `N` regardless of how each ends (same shape as SQS `maxReceiveCount` → DLQ).
+- it **claims** with one atomic `UPDATE … SET dispatched_at = now(), app_fetch_attempts = app_fetch_attempts + 1 WHERE status='fetch_failed' AND dispatched_at IS NULL AND app_fetch_attempts < N`. The **set-if-null gate is the exclusion** — a second pickup (provider remount, reordered realtime, duplicate effect) updates zero rows, so the fetch *and* the increment happen exactly once. The increment lands with the claim, so a crash mid-fetch still advances the count;
+- success → `client_fetched` + content in a single `UPDATE … WHERE status='fetch_failed'`; the status change **auto-nulls `dispatched_at`** (trigger), freeing the row for the enrich drainer;
+- a failed/crashed attempt **leaves the claim in place**; the watchdog releases it after the lease (above), re-exposing it via realtime for the next attempt;
+- once `app_fetch_attempts >= N`, the count-gated watchdog finalizes the row `failed`. Total client attempts are bounded at `N` (same shape as SQS `maxReceiveCount` → DLQ).
+
+There is **no in-memory dedup guard and no client retry interval**: exclusion is the DB claim, retry pacing is the watchdog lease (delivered via realtime), and the reconcile GET is the missed-event backstop. This replaced an earlier read-modify-write CAS on `app_fetch_attempts` that left the row in `fetch_failed` for the whole fetch, letting a second trigger re-claim mid-fetch and double the count.
 
 The worker writes **AI-owned fields only** (`name`/`summary` when unset, and **unions** AI tags with any user tags; `embedding` is v2) — never clobbering user edits, so the manual-add Save `PUT` and the worker's write don't race destructively.
 
@@ -775,6 +779,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 | Instagram scraping: ToS risk accepted, public posts only | Known maintenance liability | §8.4 |
 | YouTube: backend **oEmbed** (title + thumbnail) → `fetch_failed`; the app's **logged-out webview** recovers description + duration on its residential IP | **Confirmed YouTube IP-walls the datacenter egress** (oEmbed works; youtubei.js/youtube-transcript/yt-dlp blocked). The client-assisted fetch is the residential-IP unblock | §8.2, §8.4 |
 | Deploy is **manual** via Supabase CLI/MCP — `git push` does **not** deploy Edge functions | Avoids the "pushed but stale in prod" trap | §10 |
+| **Never apply a DB migration without a committed schema in code first** — every change to the live project's schema lands as a committed migration file before it's applied; never via ad-hoc MCP/dashboard/CLI DDL. Sole exception: throwaway testing where a rollback is already planned | The live DB must stay reproducible from the migration files in git (the §10 baseline); out-of-band DDL silently drifts prod from the schema-of-record | §8.9, §10 |
 | Website search: tags + title only, not raw page text | Keep search precise; raw text is for tagging | §8.4, §8.6 |
 
 ### Design

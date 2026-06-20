@@ -2,6 +2,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { handleOptions, json } from "../_shared/cors.ts";
 import { classifySource } from "../_shared/source.ts";
 import { getParser, resolveFinalUrl } from "../_shared/parsers/index.ts";
+import { looksLikeInterstitial } from "../_shared/parsers/interstitial.ts";
+import { makeLogger } from "../_shared/log.ts";
 import { RESOLVE_URL_TIMEOUT_MS } from "../_shared/constants.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -39,7 +41,7 @@ Deno.serve(async (req) => {
   try {
     await fetchItem(supabase, item_id);
   } catch (err) {
-    console.error(`fetch-item unhandled error for ${item_id}:`, err);
+    makeLogger("fetch", item_id).error("unhandled", err);
   }
 
   // Always 200 to pg_net — caller doesn't act on the response body.
@@ -54,6 +56,8 @@ async function fetchItem(
   supabase: ReturnType<typeof createClient>,
   itemId: string,
 ): Promise<void> {
+  const log = makeLogger("fetch", itemId);
+
   // 1. Load the row.
   const { data: item, error: loadError } = await supabase
     .from("items")
@@ -62,12 +66,13 @@ async function fetchItem(
     .single();
 
   if (loadError || !item) {
-    console.error(`fetch-item: row not found for ${itemId}`, loadError);
+    log.error("row-not-found", loadError);
     return;
   }
 
   // 2. Guard: only fetch from the `started` state (zombie / late retry → no-op).
   if (item.status !== "started") {
+    log.debug("skip", `status=${item.status}`);
     return;
   }
 
@@ -78,6 +83,7 @@ async function fetchItem(
   const url: string = item.normalized_url ?? item.url ?? "";
   const finalUrl = await resolveFinalUrl(url, RESOLVE_URL_TIMEOUT_MS);
   const source = classifySource(finalUrl);
+  log.info("start", `source=${source} url=${finalUrl}`);
 
   // 3. Fetch full content: deterministic title + thumbnail + body.
   let title: string | null = null;
@@ -86,14 +92,26 @@ async function fetchItem(
   let thumbnailUrl: string | null = null;
 
   try {
-    const fetched = await getParser(source).fetchContent(finalUrl);
+    const fetched = await getParser(source).fetchContent(finalUrl, log);
     title = fetched.title;
     rawContent = fetched.rawContent;
     consumeTime = fetched.consumeTime;
     thumbnailUrl = fetched.thumbnailUrl;
   } catch (err) {
-    console.error(`fetch-item: content fetch failed for ${itemId}:`, err);
+    log.error("fetch-error", err);
     // Proceed with nulls — the body decides the status below.
+  }
+
+  // A datacenter IP often gets a bot-detection / "please wait" wall (HTTP 200
+  // with placeholder text) instead of the real page. None of it is real content
+  // — not even the title — so discard everything the wall yielded. The row then
+  // falls to fetch_failed below and the app re-fetches on its residential IP.
+  if (looksLikeInterstitial(title, rawContent)) {
+    log.info("interstitial", "-> fetch_failed");
+    title = null;
+    rawContent = null;
+    consumeTime = null;
+    thumbnailUrl = null;
   }
 
   // 4. Status decision (PRD §11.1): `fetched` only if a usable BODY was obtained.
@@ -115,9 +133,10 @@ async function fetchItem(
       // classified a shortened link as 'website' before resolving it).
       source,
       raw_content: rawContent,
-      // name: keep a user-set name; else the deterministic title so the card
-      // is never blank while the app fetches the body / enrich-item runs.
-      name: item.name?.trim() ? item.name : title,
+      // name: keep a user-set name; else the deterministic title (when non-empty
+      // and not a discarded wall title) so the card is never blank while the app
+      // fetches the body / enrich-item runs.
+      name: item.name?.trim() ? item.name : (title?.trim() || null),
       consume_time: item.consume_time ?? consumeTime,
       thumbnail_url: item.thumbnail_url ?? thumbnailUrl,
       updated_at: new Date().toISOString(),
@@ -126,9 +145,8 @@ async function fetchItem(
     .eq("status", "started"); // the guard
 
   if (updateError) {
-    console.error(
-      `fetch-item: terminal write failed for ${itemId}:`,
-      updateError,
-    );
+    log.error("write-failed", updateError);
+    return;
   }
+  log.info("done", `status=${nextStatus} hasBody=${hasBody}`);
 }
