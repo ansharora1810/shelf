@@ -11,9 +11,10 @@ DB types: `app/src/lib/database.types.ts`. PRD: `.claude/prd/PRD.md`.
 
 `items` columns: `id, user_id, type('link'|'image'|'pdf', default 'link'), url, normalized_url,
 status('awaiting_upload'|'started'|'fetched'|'fetch_failed'|'client_fetched'|'ready'|'failed', default 'started'),
-status_changed_at, app_fetch_attempts(int default 0), raw_content, name, tags(text[] default {}), summary,
-thumbnail_url, consume_time(int seconds, nullable), project_id(fk→projects, on delete set null),
-reminder_enabled(bool default false), source('youtube'|'instagram'|'website'), created_at, updated_at`.
+status_changed_at, dispatched_at(timestamptz, nullable), app_fetch_attempts(int default 0), raw_content, name,
+tags(text[] default {}), summary, thumbnail_url, consume_time(int seconds, nullable),
+project_id(fk→projects, on delete set null), reminder_enabled(bool default false),
+source('youtube'|'instagram'|'website'), created_at, updated_at`.
 
 The staged-pipeline lifecycle (PRD §11.1) supersedes the single-stage `processing → ready/failed`:
 `started` (created, awaiting backend fetch) → `fetch-item` → `fetched` (body obtained) **or**
@@ -30,9 +31,20 @@ atomically writes `status='client_fetched'` + `raw_content`; the watchdog finali
 - Both tables are in the `supabase_realtime` publication. The app subscribes to non-terminal rows and
   picks up `fetch_failed` to drive its webview fetch.
 - `status_changed_at` is maintained by the `items_set_status_changed_at` BEFORE trigger (on insert and
-  whenever `status` changes) — no writer sets it manually. The `app_fetch_attempts` increment doesn't
-  change status, so it doesn't bump it; deadlines measure true time-in-state.
-- Watchdog `shelf_watchdog()` runs every minute via pg_cron (PRD §11.1):
+  whenever `status` changes) — no writer sets it manually. The same trigger **nulls `dispatched_at` on
+  any status change**, so the dispatch claim is always scoped to the current stage. The
+  `app_fetch_attempts` increment doesn't change status, so it doesn't bump either; deadlines measure
+  true time-in-state.
+- **Dispatch is paced, not trigger-fired (PRD §11.2).** The `items` table *is* the queue, partitioned
+  by `status`: `started` = fetch queue, `fetched`/`client_fetched` = enrich queue. Two pg_cron drainers
+  (`shelf-drain-fetch`, `shelf-drain-enrich`, every 5s) replace the old immediate-fire triggers: each
+  counts in-flight rows (`dispatched_at IS NOT NULL`) for its stage, and while below its cap `K` claims
+  undispatched rows (`FOR UPDATE SKIP LOCKED`), stamps `dispatched_at = now()`, and fires the worker via
+  pg_net (same payload as before). Surplus waits durably in-state instead of being dropped past the Edge
+  concurrency ceiling. `K_fetch`/`K_enrich` are tunable constants in the drainer functions. A third
+  hourly cron job prunes `cron.job_run_details` to 24h.
+- Watchdog `shelf_watchdog()` runs every minute via pg_cron (PRD §11.1), keyed on `status` only —
+  unchanged by §11.2 (`dispatched_at` doesn't reset any deadline; queue-wait counts against the budget):
   - `started` past 90s (time-in-state) → `fetch_failed`
   - `fetched`/`client_fetched` past 90s (time-in-state) → `failed`
   - `fetch_failed` with `app_fetch_attempts >= 3` → `failed` (**count-gated, no time predicate**)
@@ -77,14 +89,15 @@ Also called by the share extension (v2) with an App Group JWT. `verify_jwt = tru
    `source`, `project_id`, `status='started'`. Leave `name`, `summary`, `tags`, `raw_content`,
    `consume_time`, `thumbnail_url` for the workers. `status_changed_at` is set by the BEFORE trigger —
    never written here (and `processing_started_at` no longer exists).
-6. Return `{ item: <full row>, deduped: false }`. The AFTER INSERT trigger (pg_net) fires `fetch-item`.
+6. Return `{ item: <full row>, deduped: false }`. The row sits at `started`; the `shelf-drain-fetch`
+   pg_cron drainer claims it (≤5s) and fires `fetch-item` via pg_net (PRD §11.2 — no insert trigger).
 
 **Errors:** any failure that prevents inserting a row → non-2xx so the app shows "try again"
 (nothing enters the feed). A slow/empty origin is NOT an error — insert with whatever resolved.
 
 ## Edge function: `fetch-item` (fetch stage, `mode='fetch'`)
 
-Invoked by the AFTER INSERT trigger via pg_net: **`POST { item_id: string, mode: 'fetch' }`**.
+Invoked by the `shelf-drain-fetch` pg_cron drainer via pg_net (PRD §11.2): **`POST { item_id: string, mode: 'fetch' }`**.
 `verify_jwt = false` (called by the system, not a user); protect with a shared-secret header
 (`x-worker-secret`, value from env). Uses the **service-role key** (env `SUPABASE_SERVICE_ROLE_KEY`,
 auto-injected) — bypasses RLS; scope every write by `item_id`.
@@ -101,12 +114,13 @@ auto-injected) — bypasses RLS; scope every write by `item_id`.
    `name` = user-set name else fetched title, `consume_time`/`thumbnail_url` coalesced. Persists
    whatever title/thumbnail/source it got either way, so the app augments rather than starts blank.
 
-The `fetched` write fires `enrich-item` via the UPDATE trigger. A `fetch_failed` row is handed to the
-app (Realtime push + reconcile GETs) to fetch the body on its residential IP, then `client_fetched`.
+The `fetched` write lands the row in the enrich queue; the `shelf-drain-enrich` drainer claims it (≤5s)
+and fires `enrich-item` via pg_net (PRD §11.2 — no update trigger). A `fetch_failed` row is handed to
+the app (Realtime push + reconcile GETs) to fetch the body on its residential IP, then `client_fetched`.
 
 ## Edge function: `enrich-item` (AI stage, `mode='enrich'`)
 
-Invoked by the AFTER UPDATE trigger via pg_net when a row enters `fetched`/`client_fetched`:
+Invoked by the `shelf-drain-enrich` pg_cron drainer via pg_net when a row sits in `fetched`/`client_fetched` (PRD §11.2):
 **`POST { item_id: string, mode: 'enrich' }`**. Same scaffolding (`verify_jwt = false`,
 `x-worker-secret`, service-role key, always-200).
 
