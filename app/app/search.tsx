@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Image } from 'expo-image'
 import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
 import { useShelf } from '../src/store/shelf'
-import { allTags, searchLinks } from '../src/data/search'
+import { allTags, searchRemote } from '../src/data/search'
 import { Link } from '../src/types'
 import { titleAccent } from '../src/data/title'
 import { Colors, FontFamily, Radius, Spacing } from '../src/constants/tokens'
@@ -21,15 +21,47 @@ export default function SearchScreen() {
   const { links } = useShelf()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
+  const [results, setResults] = useState<Link[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const reqId = useRef(0)
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebounced(query), 150)
+    const timer = setTimeout(() => setDebounced(query), 250)
     return () => clearTimeout(timer)
   }, [query])
 
+  // Remote hybrid search (§11.1). The request id discards out-of-order responses
+  // so a slow earlier query can't overwrite a newer one's results.
+  useEffect(() => {
+    const q = debounced.trim()
+    if (!q) {
+      setResults([])
+      setLoading(false)
+      setError(false)
+      return
+    }
+    const id = ++reqId.current
+    setLoading(true)
+    setError(false)
+    searchRemote(q)
+      .then(items => {
+        if (id !== reqId.current) return
+        setResults(items)
+        setLoading(false)
+      })
+      .catch(() => {
+        if (id !== reqId.current) return
+        setError(true)
+        setLoading(false)
+      })
+  }, [debounced])
+
   const tags = useMemo(() => allTags(links), [links])
-  const results = useMemo(() => searchLinks(debounced, links), [debounced, links])
-  const hasQuery = query.trim().length > 0
+  const trimmed = query.trim()
+  const hasQuery = trimmed.length > 0
+  // Keep the spinner up through the debounce gap so stale results don't flash.
+  const searching = hasQuery && (loading || trimmed !== debounced.trim())
 
   return (
     <SafeAreaView style={styles.screen} edges={['top']}>
@@ -74,10 +106,19 @@ export default function SearchScreen() {
               ))}
             </View>
           </>
+        ) : searching ? (
+          <View style={styles.empty}>
+            <ActivityIndicator color={Colors.primary} />
+          </View>
+        ) : error ? (
+          <View style={styles.empty}>
+            <Ionicons name="cloud-offline-outline" size={32} color={Colors.textSecondary} />
+            <Text style={styles.emptyText}>Couldn’t search. Check your connection and try again.</Text>
+          </View>
         ) : results.length === 0 ? (
           <View style={styles.empty}>
             <Ionicons name="search-outline" size={32} color={Colors.textSecondary} />
-            <Text style={styles.emptyText}>No matches for “{query.trim()}”</Text>
+            <Text style={styles.emptyText}>No matches for “{trimmed}”</Text>
           </View>
         ) : (
           results.map(link => (

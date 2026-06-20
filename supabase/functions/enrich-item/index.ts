@@ -1,6 +1,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { handleOptions, json } from "../_shared/cors.ts";
 import { Logger, makeLogger } from "../_shared/log.ts";
+import { buildEmbeddingInput, embedText, toVectorLiteral } from "../_shared/embedding.ts";
 import {
   GEMINI_BACKOFF_MS,
   GEMINI_CONTENT_LIMIT,
@@ -45,18 +46,24 @@ Deno.serve(async (req) => {
   }
 
   const { item_id, mode } = body;
-  if (!item_id || mode !== "enrich") {
-    return json({ error: "item_id and mode='enrich' are required" }, 400);
+  if (!item_id || (mode !== "enrich" && mode !== "embed")) {
+    return json({ error: "item_id and mode in ('enrich','embed') are required" }, 400);
   }
 
   // Service-role client bypasses RLS — every write is scoped by item_id.
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // Wrap everything so the worker never throws unhandled.
+  // Wrap everything so the worker never throws unhandled. `embed` is the
+  // embedding-only primitive (backfill now; the v2 re-embed-on-edit will reuse
+  // it) — it regenerates the vector for a ready row without touching AI fields.
   try {
-    await enrichItem(supabase, item_id);
+    if (mode === "embed") {
+      await embedItem(supabase, item_id);
+    } else {
+      await enrichItem(supabase, item_id);
+    }
   } catch (err) {
-    makeLogger("enrich", item_id).error("unhandled", err);
+    makeLogger(mode === "embed" ? "embed" : "enrich", item_id).error("unhandled", err);
   }
 
   // Always 200 to pg_net — caller doesn't act on the response body.
@@ -128,16 +135,50 @@ async function enrichItem(
   const hasAnything = item.raw_content || item.name || aiResult;
   const finalStatus = hasAnything ? "ready" : "failed";
 
+  // name: keep a user-set / fetch-stage name; else the AI name; else keep.
+  const finalName = item.name?.trim() ? item.name : (aiResult?.name ?? item.name);
+
+  // Embed the final view of the item (§11.1): name + the AI⋃existing tag set +
+  // summary, as a labelled string. Done here so the vector lands in the same
+  // terminal write as the AI fields. A failure degrades to a ready row with a
+  // null embedding (still fuzzy-searchable), never failing the item. The tag set
+  // matches what add_item_tags merges below. Re-embed-on-edit is v2.
+  const currentItemTags = Array.isArray(item.tags) ? (item.tags as string[]) : [];
+  const aiTags = aiResult?.tags ?? [];
+  const mergedTags = Array.from(new Set([...currentItemTags, ...aiTags]));
+
+  let embeddingLiteral: string | null = null;
+  if (finalStatus === "ready") {
+    try {
+      const vector = await embedText(
+        buildEmbeddingInput({
+          name: finalName,
+          tags: mergedTags,
+          summary: aiResult?.summary ?? null,
+          rawContent: item.raw_content as string | null,
+        }),
+        "RETRIEVAL_DOCUMENT",
+        log,
+      );
+      embeddingLiteral = toVectorLiteral(vector);
+    } catch (err) {
+      log.error("embed-failed", err);
+    }
+  }
+
+  const update: Record<string, unknown> = {
+    status: finalStatus,
+    // summary is AI-owned and always written when available.
+    summary: aiResult?.summary ?? null,
+    name: finalName,
+    updated_at: new Date().toISOString(),
+  };
+  // Only write the embedding when we have one — never clobber with null.
+  if (embeddingLiteral) update.embedding = embeddingLiteral;
+
   const { data: written, error: updateError } = await supabase
     .from("items")
-    .update({
-      status: finalStatus,
-      // summary is AI-owned and always written when available.
-      summary: aiResult?.summary ?? null,
-      // name: keep a user-set / fetch-stage name; else the AI name; else keep.
-      name: item.name?.trim() ? item.name : (aiResult?.name ?? item.name),
-      updated_at: new Date().toISOString(),
-    })
+    .update(update)
     .eq("id", itemId)
     .eq("status", ENRICHABLE_STATUS) // the guard
     .select("id");
@@ -146,12 +187,11 @@ async function enrichItem(
     log.error("write-failed", updateError);
     return;
   }
-  log.info("done", `status=${finalStatus}`);
+  log.info("done", `status=${finalStatus} embedded=${embeddingLiteral !== null}`);
 
   // 7. Append AI tags atomically (tags || new), only if we won the terminal
   //    write. Same path as the manual-add Save — both writers append, neither
   //    replaces, so a concurrent user tag merge can't be clobbered.
-  const aiTags = aiResult?.tags ?? [];
   if (written && written.length > 0 && aiTags.length > 0) {
     const { error: tagError } = await supabase.rpc("add_item_tags", {
       p_id: itemId,
@@ -161,6 +201,64 @@ async function enrichItem(
       log.error("tag-merge-failed", tagError);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Embed-only stage — regenerate the embedding for a `ready` row from its current
+// name/tags/summary (§11.1). Used by the one-time backfill; the v2 re-embed-on-
+// edit trigger will reuse this path. Touches the embedding column only.
+// ---------------------------------------------------------------------------
+
+async function embedItem(
+  supabase: ReturnType<typeof createClient>,
+  itemId: string,
+): Promise<void> {
+  const log = makeLogger("embed", itemId);
+
+  const { data: item, error: loadError } = await supabase
+    .from("items")
+    .select("*")
+    .eq("id", itemId)
+    .single();
+
+  if (loadError || !item) {
+    log.error("row-not-found", loadError);
+    return;
+  }
+  if (item.status !== "ready") {
+    log.debug("skip", `status=${item.status}`);
+    return;
+  }
+
+  let embeddingLiteral: string;
+  try {
+    const vector = await embedText(
+      buildEmbeddingInput({
+        name: item.name as string | null,
+        tags: item.tags as string[] | null,
+        summary: item.summary as string | null,
+        rawContent: item.raw_content as string | null,
+      }),
+      "RETRIEVAL_DOCUMENT",
+      log,
+    );
+    embeddingLiteral = toVectorLiteral(vector);
+  } catch (err) {
+    log.error("embed-failed", err);
+    return;
+  }
+
+  const { error: updateError } = await supabase
+    .from("items")
+    .update({ embedding: embeddingLiteral })
+    .eq("id", itemId)
+    .eq("status", "ready");
+
+  if (updateError) {
+    log.error("write-failed", updateError);
+    return;
+  }
+  log.info("done", "embedded=true");
 }
 
 // ---------------------------------------------------------------------------

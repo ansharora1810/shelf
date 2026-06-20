@@ -26,7 +26,22 @@ function parseSharedUrl(deepLink: string): string | null {
   return /^https?:\/\//i.test(out) ? out : null
 }
 
-function mapItem(row: ItemRow): Link {
+// Columns the client actually needs (the mapItem set). Excludes the heavy
+// embedding (768 floats) and raw_content — both server-only — so the bulk load
+// stays small (§11.1). Realtime still carries them on changed rows; harmless.
+const ITEM_COLUMNS =
+  'id, name, thumbnail_url, url, source, status, tags, summary, reminder_enabled, project_id, consume_time, created_at, app_fetch_attempts'
+
+// Exactly the columns ITEM_COLUMNS selects — also what every other caller (full
+// rows from realtime / create / update) structurally satisfies.
+type MappableItem = Pick<
+  ItemRow,
+  | 'id' | 'name' | 'thumbnail_url' | 'url' | 'source' | 'status' | 'tags'
+  | 'summary' | 'reminder_enabled' | 'project_id' | 'consume_time'
+  | 'created_at' | 'app_fetch_attempts'
+>
+
+export function mapItem(row: MappableItem): Link {
   return {
     id: row.id,
     name: row.name ?? '',
@@ -92,7 +107,7 @@ export function ShelfProvider({ children }: { children: ReactNode }) {
   const reconcile = useCallback(async () => {
     if (!userId) return
     const [items, projs] = await Promise.all([
-      supabase.from('items').select('*'),
+      supabase.from('items').select(ITEM_COLUMNS),
       supabase.from('projects').select('*'),
     ])
     if (!items.error && items.data) setLinks(items.data.map(mapItem))

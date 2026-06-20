@@ -1,7 +1,8 @@
 # Shelf Edge Functions
 
-Three Deno/TypeScript functions deployed on Supabase Edge Functions, implementing the
-staged client-assisted fetch pipeline (PRD §11.1):
+Four Deno/TypeScript functions deployed on Supabase Edge Functions: the staged client-assisted
+fetch pipeline (`create-item` → `fetch-item` → `enrich-item`, PRD §8.2) and hybrid `search`
+(PRD §11.1). Pipeline:
 
 ```
 create-item → [started] → fetch-item → [fetched]        → enrich-item → [ready]
@@ -55,15 +56,36 @@ The AI stage. `verify_jwt = false`, `x-worker-secret`, service-role key — same
 2. Loads the item by `item_id`; no-ops if `status != 'fetched'` (zombie guard).
 3. Builds the prompt from `name`/title + `raw_content` + `url`; fetches the user's tag vocabulary (`get_user_tags`) to bias tag reuse.
 4. Calls Gemini 2.5 Flash-Lite once for structured `{ name, summary, tags[3..6] }` output.
-5. Writes the terminal state in a **single guarded update** (`WHERE id = ? AND status = 'fetched'` — `ready` excluded so the write can't self-trigger):
+5. Embeds the final view (name + AI⋃existing tags + summary) via `gemini-embedding-001`@768 (`_shared/embedding.ts`) when landing `ready`; an embed failure degrades to a null embedding (still fuzzy-searchable).
+6. Writes the terminal state in a **single guarded update** (`WHERE id = ? AND status = 'fetched'` — `ready` excluded so the write can't self-trigger):
    - `status` → `ready` (or `failed` only if nothing usable at all)
-   - `summary` — AI-owned, always written
+   - `summary` — AI-owned, always written; `embedding` — written only when computed
    - `name` — kept if user-set / fetched, else AI name, else unchanged
-6. `add_item_tags` RPC (union of existing tags and AI tags) — only if the guarded write won.
+7. `add_item_tags` RPC (union of existing tags and AI tags) — only if the guarded write won.
 
-**Request body (from pg_net trigger):** `{ item_id: string, mode: "enrich" }`
+**Request body:** `{ item_id: string, mode: "enrich" }`, or `{ item_id, mode: "embed" }` for the
+embed-only primitive (regenerate `embedding` for a `ready` row — used by the one-time backfill; the
+v2 re-embed-on-edit trigger will reuse it).
 
 **Response:** `{ ok: true }` (always 200 to pg_net; errors are logged)
+
+---
+
+### `search` — `POST /functions/v1/search`
+
+Hybrid search (PRD §11.1). `verify_jwt = true` — the gateway rejects anon; the function builds a
+caller-JWT client so the strategy RPCs read through RLS.
+
+**What it does:**
+1. Empty query → `{ items: [] }`.
+2. Embeds the query (`gemini-embedding-001`@768, `RETRIEVAL_QUERY`).
+3. A `Search` Composite runs two `ISearch` strategies concurrently — `SemanticSearch`
+   (`shelf_search_semantic`, pgvector cosine) and `FuzzySearch` (`shelf_search_fuzzy`,
+   `word_similarity` on name + tags) — and fuses their ranked lists by **Reciprocal Rank Fusion**
+   (k=60). A failed query embedding degrades to fuzzy-only.
+4. Returns rows with `embedding` + `raw_content` stripped.
+
+**Request body:** `{ query: string }`  **Response:** `{ items: ItemRow[] }`
 
 ---
 
@@ -82,20 +104,21 @@ platform — do not (and cannot) set them: the `SUPABASE_` prefix is reserved fo
 | Variable | Who sets it | Used by |
 |---|---|---|
 | `SUPABASE_URL` | Platform (auto) | All functions |
-| `SUPABASE_ANON_KEY` | Platform (auto) | `create-item` only |
+| `SUPABASE_ANON_KEY` | Platform (auto) | `create-item` + `search` (caller-JWT client) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Platform (auto) | `fetch-item` + `enrich-item` |
-| `GEMINI_API_KEY` | You (secret) | `enrich-item` only — without it the row still lands `ready`, just with no AI name/summary/tags |
-| `WORKER_SECRET` | You (secret) | `fetch-item` + `enrich-item` header check; must equal the Vault `worker_secret` the triggers read |
+| `GEMINI_API_KEY` | You (secret) | `enrich-item` (AI + document embeddings) + `search` (query embedding) |
+| `WORKER_SECRET` | You (secret) | `fetch-item` + `enrich-item` header check; must equal the Vault `worker_secret` the drainers read |
 
 ---
 
 ## Deployment
 
 ```bash
-# Deploy all three functions
+# Deploy all functions
 supabase functions deploy create-item  --project-ref hpnxuouiyrhlqabkgmis
 supabase functions deploy fetch-item   --project-ref hpnxuouiyrhlqabkgmis
 supabase functions deploy enrich-item  --project-ref hpnxuouiyrhlqabkgmis
+supabase functions deploy search       --project-ref hpnxuouiyrhlqabkgmis
 ```
 
 Or via the Supabase MCP tool:

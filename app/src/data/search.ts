@@ -1,4 +1,19 @@
 import { Link } from '../types'
+import { supabase } from '../lib/supabase'
+import { mapItem } from '../store/shelf'
+import { ItemRow } from '../lib/database.types'
+
+// v1+ hybrid search (PRD §11.1): POST /search embeds the query server-side and
+// fuses semantic + fuzzy results (RRF). Returns full item rows; we map them to
+// Link the same way the store does. The tag browser stays client-side (allTags).
+export async function searchRemote(query: string): Promise<Link[]> {
+  const q = query.trim()
+  if (!q) return []
+  const { data, error } = await supabase.functions.invoke('search', { body: { query: q } })
+  if (error) throw error
+  const items = (data?.items ?? []) as ItemRow[]
+  return items.map(mapItem)
+}
 
 export function allTags(links: Link[]): string[] {
   const freq: Record<string, number> = {}
@@ -8,13 +23,4 @@ export function allTags(links: Link[]): string[] {
   return Object.entries(freq)
     .sort((a, b) => b[1] - a[1])
     .map(([tag]) => tag)
-}
-
-export function searchLinks(query: string, links: Link[]): Link[] {
-  const q = query.trim().toLowerCase().replace(/^#/, '')
-  if (!q) return []
-  return links.filter(link => {
-    const haystack = [link.name, link.summary, ...link.tags].join(' ').toLowerCase()
-    return haystack.includes(q)
-  })
 }

@@ -18,6 +18,7 @@ export type Database = {
           app_fetch_attempts: number
           consume_time: number | null
           created_at: string
+          embedding: string | null
           id: string
           name: string | null
           normalized_url: string | null
@@ -39,6 +40,7 @@ export type Database = {
           app_fetch_attempts?: number
           consume_time?: number | null
           created_at?: string
+          embedding?: string | null
           id?: string
           name?: string | null
           normalized_url?: string | null
@@ -60,6 +62,7 @@ export type Database = {
           app_fetch_attempts?: number
           consume_time?: number | null
           created_at?: string
+          embedding?: string | null
           id?: string
           name?: string | null
           normalized_url?: string | null

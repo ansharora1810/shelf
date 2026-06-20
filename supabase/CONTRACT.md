@@ -14,7 +14,7 @@ status('awaiting_upload'|'started'|'fetched'|'fetch_failed'|'ready'|'failed', de
 status_changed_at, dispatched_at(timestamptz, nullable), app_fetch_attempts(int default 0), raw_content, name,
 tags(text[] default {}), summary, thumbnail_url, consume_time(int seconds, nullable),
 project_id(fk→projects, on delete set null), reminder_enabled(bool default false),
-source('youtube'|'instagram'|'website'), created_at, updated_at`.
+source(real normalized host, free text), embedding(vector(768), nullable), created_at, updated_at`.
 
 The staged-pipeline lifecycle (PRD §11.1) supersedes the single-stage `processing → ready/failed`:
 `started` (created, awaiting backend fetch) → `fetch-item` → `fetched` (body obtained) **or**
@@ -26,7 +26,7 @@ Residential-fetch provenance is encoded in `app_fetch_attempts` (> 0), not a dis
 
 `projects` columns: `id, user_id, name(1–20 chars), created_at, updated_at`.
 
-- No `embedding` column (semantic search is v2).
+- **Hybrid search (PRD §11.1).** `embedding vector(768)` (Gemini `gemini-embedding-001`@768, L2-normalized, over a `Title/Tags/Summary` string), written by `enrich-item`. Extensions `vector` + `pg_trgm` (in `extensions` schema). Indexes: HNSW cosine partial (`items_embedding_hnsw_idx where embedding is not null`) + name trigram GIN (`items_name_trgm_idx`). Two SECURITY-INVOKER RPCs (RLS-scoped to the caller): `shelf_search_semantic(p_query_embedding text, p_limit)` (orders by `embedding <=> query::vector`) and `shelf_search_fuzzy(p_query text, p_threshold default 0.4, p_limit)` (`word_similarity` over name + tags). The `search` Edge fn composes them (see below).
 - Dedup: partial unique index `(user_id, normalized_url) where type='link' and normalized_url is not null`.
 - `items` DELETE is RLS-blocked on all non-terminal states; allowed only on `ready` / `failed`.
 - Both tables are in the `supabase_realtime` publication. The app subscribes to non-terminal rows and
@@ -119,28 +119,45 @@ The `fetched` write lands the row in the enrich queue; the `shelf-drain-enrich` 
 and fires `enrich-item` via pg_net (PRD §11.2 — no update trigger). A `fetch_failed` row is handed to
 the app (Realtime push + reconcile GETs) to fetch the body on its residential IP, then writes `fetched`.
 
-## Edge function: `enrich-item` (AI stage, `mode='enrich'`)
+## Edge function: `enrich-item` (AI stage, `mode='enrich'` | `'embed'`)
 
 Invoked by the `shelf-drain-enrich` pg_cron drainer via pg_net when a row sits in `fetched` (PRD §11.2):
 **`POST { item_id: string, mode: 'enrich' }`**. Same scaffolding (`verify_jwt = false`,
 `x-worker-secret`, service-role key, always-200).
 
-**Behavior:**
+**`enrich` behavior:**
 1. Load row by `item_id`. If `status != 'fetched'`, no-op.
 2. Build the prompt from `name`/title + `raw_content` + `url`. Fetch the user's tag vocabulary
    (`get_user_tags`) and bias the model toward reuse.
 3. One **Gemini 2.5 Flash-Lite** structured-output call → `{ name, summary, tags[] }` (3–6 tags,
    each kebab-case with a leading `#`). Key in env `GEMINI_API_KEY`.
-4. **Guarded terminal write** — `UPDATE items SET … WHERE id = :item_id AND status = 'fetched'`
+4. Embed the final view (name + AI⋃existing tags + summary, §11.1) via `gemini-embedding-001`@768
+   (`_shared/embedding.ts`, `RETRIEVAL_DOCUMENT`), only when landing `ready`. A failure degrades to a
+   `ready` row with a null embedding (still fuzzy-searchable), never failing the item.
+5. **Guarded terminal write** — `UPDATE items SET … WHERE id = :item_id AND status = 'fetched'`
    (`ready` excluded so this write can't self-trigger the enrich kick):
-   - `status` = `'ready'` (`failed` reserved for the truly-nothing case — by this stage there's
-     almost always a body or title)
-   - `summary` = AI summary (AI-owned)
-   - `name` = user-set / fetched name, else AI name, else keep
-5. `add_item_tags` RPC (atomic append: `tags || ai_tags`) — only if the guarded write won, so a
+   - `status` = `'ready'` (`failed` reserved for the truly-nothing case)
+   - `summary` = AI summary (AI-owned); `name` = user/fetched name, else AI name, else keep;
+     `embedding` written only when computed (never clobbered with null).
+6. `add_item_tags` RPC (atomic append: `tags || ai_tags`) — only if the guarded write won, so a
    concurrent manual-add tag merge is never clobbered.
 
-No `reembed` mode in v1 (v2). No retry/`reprocess` endpoint in v1 (failed → user removes + re-adds).
+**`embed` mode** (`POST { item_id, mode: 'embed' }`): the embed-only primitive — loads a `ready` row,
+rebuilds the embedding input from current `name`/`tags`/`summary` (raw_content fallback), embeds, and
+writes only `embedding` (guarded `WHERE id AND status='ready'`). Used by the one-time backfill; the v2
+re-embed-on-edit trigger will reuse it. No retry/`reprocess` endpoint in v1 (failed → remove + re-add).
+
+## Edge function: `search` (POST `/search`)
+
+Invoked from the app as `supabase.functions.invoke('search', { body: { query } })`. `verify_jwt = true`
+(anon rejected by the platform); builds a caller-JWT client so the strategy RPCs read through RLS.
+
+**Request:** `{ query: string }` → **Response:** `{ items: ItemRow[] }` (embedding + raw_content stripped).
+
+**Behavior (PRD §11.1):** empty query → `{ items: [] }`. Else embed the query (`gemini-embedding-001`@768,
+`RETRIEVAL_QUERY`); a `Search` Composite runs two `ISearch` strategies — `SemanticSearch`
+(`shelf_search_semantic`) + `FuzzySearch` (`shelf_search_fuzzy`) — concurrently and fuses their ranked
+lists by **Reciprocal Rank Fusion** (k=60). If the query embedding fails, it degrades to fuzzy-only.
 
 ## Frontend data model (camelCase) — mapping from `ItemRow`
 
@@ -163,9 +180,13 @@ The frontend's `Link`/`Item` type maps DB snake_case → camelCase. Key changes 
 - Manual add: `supabase.functions.invoke('create-item', { body: { url, project_id } })` → on
   `deduped` show "Already in your shelf" + surface existing item; else popup expands with returned
   non-AI fields → Save = `PUT` (supabase `.update()`) of user `name`/`tags`/`project_id`/`reminder_enabled`.
-- Plain CRUD is direct supabase client + RLS: `GET` = `.select('*')`, edit = `.update()`,
+- Plain CRUD is direct supabase client + RLS: items `GET` selects an **explicit column list**
+  (the `mapItem` set — excludes the heavy `embedding` + `raw_content`), edit = `.update()`,
   delete item = `.delete()` (rejected on any non-terminal state), upsert project = `.insert()`/`.update()`,
   delete project = `.delete()` after first nulling or deleting member items per the `delete_items` choice.
+- Search: `searchRemote(query)` → `supabase.functions.invoke('search', { body: { query } })` → rows mapped
+  via `mapItem`. The search screen keeps the no-query tag browser client-side (`allTags`) and calls the
+  endpoint (debounced, loading/error/empty states, stale-response guard) for a typed query or tapped tag.
 - Realtime: subscribe to `items` changes where `user_id = me` (filter client-side on payload) for
   non-terminal fill-in **and** to pick up `fetch_failed` rows to drive the client-assisted fetch.
   Reconcile via full parallel `GET items`+`GET projects` on session-acquired, foreground, network

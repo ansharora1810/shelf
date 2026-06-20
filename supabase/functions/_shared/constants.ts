@@ -21,6 +21,14 @@ export const GEMINI_CONTENT_LIMIT = 12_000; // chars of raw_content sent to the 
 export const GEMINI_TAGS_MIN = 3;
 export const GEMINI_TAGS_MAX = 6;
 
+// Gemini embeddings (search — §11.1). gemini-embedding-001 truncated to 768 dims
+// (Matryoshka) and L2-normalized; the column type is vector(768).
+export const GEMINI_EMBED_MODEL = "gemini-embedding-001";
+export const GEMINI_EMBED_DIM = 768;
+// When an item has no summary, fall back to the head of raw_content as the
+// Summary field of the embedding input (§11.1 open-item #4).
+export const EMBED_SUMMARY_FALLBACK_CHARS = 2_000;
+
 // Verbose website fetch/parse logging (response code, raw body, parsed body).
 // Surfaces in the edge-function logs. Set false for release.
 export const DEBUG_PARSING = true;

@@ -412,7 +412,7 @@ flowchart LR
 | `summary` | No | AI-generated |
 | `thumbnail_url` | No | From OG/Twitter tags or oEmbed; may arrive in the fast create response |
 | `consume_time` | No | Estimated time to consume, in **seconds** (read / watch / listen). Derived during processing (§8.4). `null` when not applicable or unknown; UI hides the badge when blank |
-| `embedding` | Derived (**v2**) | `raw_content + current name + current tags` → one vector. Not generated in v1 (search is client-side keyword, §8.6) |
+| `embedding` | Derived | `vector(768)` — `gemini-embedding-001` (L2-normalized), over a labelled `Title / Tags / Summary` string (§11.1), written by `enrich-item` in the terminal write. Powers semantic search (§8.6). Null until enriched; re-embed-on-edit is v2 |
 | `project_id` | Yes | Optional; FK → `projects.id`. On project delete, either the items are deleted or `project_id` is set null, per the `delete_items` flag (§8.7) |
 | `reminder_enabled` | Yes | Push notification toggle |
 | `source` | No | The link's **real normalized host** (e.g. `youtube.com`, `nytimes.com`), via `tldts`. Not a fixed bucket — an unrecognized host keeps its true identity. YouTube/Instagram get dedicated parsers; everything else uses the website parser (§8.4) |
@@ -581,30 +581,30 @@ URL handling uses standard libraries — `normalize-url` (canonicalize, add sche
 
 ### 8.6 Search
 
-**v1 — keyword (client-side).** Search runs entirely on the device over the already-loaded items: case-insensitive substring/keyword match against `name`, `tags`, and `summary`. No backend call, no endpoint, no embeddings. (This is the current frontend behaviour — promote it from stand-in to the v1 mechanism.)
+**Hybrid (semantic + fuzzy), server-side.** Search is a `POST /search` Edge Function structured as a **Composite over two Strategies** (full architecture in §11.1): semantic (pgvector cosine) and fuzzy (pg_trgm), fused by **Reciprocal Rank Fusion**. The tag browser (no query) stays client-side (`allTags` over loaded items); a typed query — or a tapped tag — calls the endpoint (debounced, with loading/error states). The earlier client-side keyword match was the v1 stand-in; it's now replaced.
 
-**v2 — semantic (deferred).** The differentiator (soy surfaces soya):
+- **Embeddings:** **Gemini `gemini-embedding-001` @ 768 dims, L2-normalized** (reuses the existing `GEMINI_API_KEY` — same provider as enrich; revised from the originally-specified OpenAI `text-embedding-3-small`, §11.1). pgvector on Supabase, **HNSW** cosine index (`vector(768)`, partial on non-null).
+- **What gets embedded:** a labelled `Title / Tags / Summary` string (not raw concatenation) — see §11.1. `summary` is the AI-distilled meaning; `raw_content` is *not* embedded (it stays the immutable re-summarise/re-embed base, §8.1). Fallback: first ~2000 chars of `raw_content` as Summary when the summary is absent.
+- **Generation:** `enrich-item` produces the embedding in its terminal write (one Gemini embed call appended to the AI step). A throwaway one-time backfill embedded pre-existing items.
+- **Search endpoint:** `POST /search { query }` (Edge fn, `verify_jwt=true`) — embeds the query (server-side key, `RETRIEVAL_QUERY`), runs both strategy RPCs (`shelf_search_semantic`, `shelf_search_fuzzy`), merges by RRF (k=60), returns items. RLS scopes to the caller.
+- **Fuzzy scope — `name` + `tags`, via `word_similarity` (threshold 0.4):** trigram word-similarity (best-window match, not whole-string) so a short query/typo matches a long title. `raw_content` excluded (long text → slow + noisy). Handles typos and exact-term recall semantic misses.
+- **Semantic scope — the `embedding` column:** synonym/concept matching fuzzy can't (`soy`→`soya`, `technology`→`semiconductors`).
+- **Re-embed on edit — v2 (deferred):** a name/tag edit should fire a Postgres trigger → pg_net → `enrich-item` `embed` mode (the embed primitive already exists, used by the backfill). Not wired in v1; edited items keep their original embedding until a future re-embed.
 
-- **Embeddings:** OpenAI `text-embedding-3-small` → pgvector on Supabase; HNSW index for sub-50ms queries.
-- **What gets embedded:** `raw_content + current name + current tags` per item. The worker generates it; `raw_content` (already stored in v1) is the immutable base, so v2 needs no re-fetch.
-- **Search endpoint:** `POST /search { query }` (Lambda) — embeds the query (OpenAI key is server-side only), runs the pgvector similarity query, returns items.
-- **Re-embed on edit:** async — a name/tag edit fires a Postgres trigger → pg_net → the worker in `reembed` mode (regenerates only the embedding), guarded so the worker's own write doesn't self-trigger. Brief, harmless search staleness.
-- **Website search scope:** tags + title only, not raw page text.
-
-`raw_content` is stored immutably in **v1** even though nothing reads it yet, so v2 embeddings (and global dedup, §8.3) drop in without re-fetching.
+`raw_content` remains stored immutably as the base for re-summarisation / re-embedding and global dedup (§8.3).
 
 ### 8.7 API surface
 
-Most of the surface is **not** a hand-written endpoint — the app calls Supabase directly and **RLS** (`user_id = auth.uid()`) enforces ownership. In **v1 the only app-facing backend function is `POST /items`** (create-item, an Edge function); the `fetch-item` and `enrich-item` workers are system-invoked by the paced drainers (§8.2), never called by the app. `reprocess` and `POST /search` are v2 (§8.9).
+Most of the surface is **not** a hand-written endpoint — the app calls Supabase directly and **RLS** (`user_id = auth.uid()`) enforces ownership. The app-facing Edge functions are **`POST /items`** (create-item) and **`POST /search`** (hybrid search, §8.6/§11.1); the `fetch-item` and `enrich-item` workers are system-invoked by the paced drainers (§8.2), never called by the app. `reprocess` is v2 (§8.9).
 
 | Method | Endpoint | Where | Purpose |
 |---|---|---|---|
 | GET | `/items` | Direct + RLS | Load all items (full rows) |
 | GET | `/projects` | Direct + RLS | Load all projects on open (catches empty projects) |
 | POST | `/items` | **Edge fn** | **Create** — body branches on kind. **Link:** `{ url, project_id? }` → **normalize → dedup → insert at `started` → return**, a sub-100ms DB-only op with **no network calls** (`source` is a best-effort from the normalized host). All enrichment — title, thumbnail, resolved source, content, AI — is the **workers'** job (`fetch-item` then `enrich-item`), picked up from the queue by the paced drainers (§8.2); this keeps the create response (and the share sheet) instant. Idempotent on `normalized_url` collision (§8.3). **File (v2):** `{ type, filetype, size, project_id? }` (app pre-validates) → row at `awaiting_upload`, returns `{ id, upload_url }` (presigned PUT, 3-min TTL, type/size-constrained, id in object key). See §8.8 |
-| PUT | `/items/:id` | Direct + RLS | **Update** — manual-add Save (user tags / project / name) and later edits. A name/tag change fires the async re-embed trigger (§8.6) |
+| PUT | `/items/:id` | Direct + RLS | **Update** — manual-add Save (user tags / project / name) and later edits. (The re-embed-on-edit trigger is v2, §8.6.) |
 | POST | `/items/:id/reprocess` | **Lambda (v2)** | **Retry** a `failed` item (§8.2). Guarded `failed → started`, resets `status_changed_at`, re-enters the pipeline. Artifact present (file in storage / link URL) → just re-enter; a file upload that never landed → returns a fresh `{ upload_url }` and sets `awaiting_upload` so the app re-uploads. **v1 has no retry** (failed → Remove) |
-| POST | `/search` | **Lambda (v2)** | Semantic search — embeds the query, pgvector similarity, returns items (§8.6). **v1 search is client-side keyword, no endpoint** |
+| POST | `/search` | **Edge fn** | **Hybrid search** — `{ query }` → embeds the query (Gemini, server-side), runs the semantic + fuzzy strategy RPCs, fuses by RRF, returns items. `verify_jwt=true`, RLS-scoped (§8.6, §11.1) |
 | POST | `/projects` | Direct + RLS | Upsert project — create (no id) or update (id present) |
 | DELETE | `/items/:id` | Direct + RLS | Delete an item (rejected on any non-terminal state — untouchable until terminal `ready`/`failed`, §8.2) |
 | DELETE | `/projects/:id` | Direct + RLS | Delete a project. Body `{ delete_items: bool }` — `true` deletes the project's items; `false` orphans them (`project_id → null`). The app prompts the user to choose (§6.9) |
@@ -795,7 +795,7 @@ Settled decisions and the reasoning behind them. Detail lives in the sections re
 
 ## 10. Implementation status
 
-_Snapshot: 2026-06-20. Real Supabase data layer (direct client + RLS, Realtime fill-in, reconcile GETs, session-gated). The v1 backend is **Supabase Edge Functions**, deployed. The worker is **split into `fetch-item` + `enrich-item`** with a **client-assisted fetch** middle step (staged pipeline, §8.2); `create-item` is an instant DB-only op (normalize → dedup → insert at `started`). Dispatch is **paced** — pg_cron drainers over the items-table-as-queue replace the immediate-fire triggers; per-state pg_cron watchdog live; AI tagging (Gemini) active. YouTube/IG/Reddit bodies are IP-walled server-side and recovered by the app's logged-out webview on `fetch_failed`. The whole schema is now captured in **one baseline migration** (`supabase/migrations/20260613000000_baseline.sql`) and the live DB was rebuilt from it. The add-link sheet is **single-phase**; the loading state is `ShimmerText`. Deploys are **manual** via the Supabase CLI/MCP (git push ≠ deploy). Share extension, onboarding, pricing/IAP, and all v2 items remain pending._
+_Snapshot: 2026-06-20. Real Supabase data layer (direct client + RLS, Realtime fill-in, reconcile GETs, session-gated). The v1 backend is **Supabase Edge Functions**, deployed. The worker is **split into `fetch-item` + `enrich-item`** with a **client-assisted fetch** middle step (staged pipeline, §8.2); `create-item` is an instant DB-only op (normalize → dedup → insert at `started`). Dispatch is **paced** — pg_cron drainers over the items-table-as-queue replace the immediate-fire triggers; per-state pg_cron watchdog live; AI tagging (Gemini) active. YouTube/IG/Reddit bodies are IP-walled server-side and recovered by the app's logged-out webview on `fetch_failed`. The whole schema is now captured in **one baseline migration** (`supabase/migrations/20260613000000_baseline.sql`) and the live DB was rebuilt from it. The add-link sheet is **single-phase**; the loading state is `ShimmerText`. **Hybrid search (§11.1) is live**: `enrich-item` writes a 768-dim Gemini embedding; `POST /search` fuses pgvector (semantic) + pg_trgm `word_similarity` (fuzzy) by RRF; existing items were backfilled. Deploys are **manual** via the Supabase CLI/MCP (git push ≠ deploy). Share extension, onboarding, pricing/IAP, re-embed-on-edit, and the remaining v2 items are pending._
 
 | Area | Status | Notes |
 |---|---|---|
@@ -808,7 +808,7 @@ _Snapshot: 2026-06-20. Real Supabase data layer (direct client + RLS, Realtime f
 | Item detail screen | ✅ Done | Name, source, summary, tags, reminder toggle, open/delete |
 | Add item / create / edit project | ✅ Done | **Add-link sheet is single-phase** (paste → Add → dismiss); enrichment streams into the feed card. Create/edit project bottom sheets on real data |
 | Processing loading state (`ShimmerText`) | ✅ Done | Host shown with a left→right shine on card + detail while non-terminal; Reanimated 4 + `expo-linear-gradient` (§6.3) |
-| Search screen (v1 keyword) | ✅ Done | Tag browser + live keyword results over name/tags/summary, now over real loaded items. Semantic is v2 (§8.6) |
+| Search screen (hybrid) | ✅ Done | Tag browser (client-side) + debounced remote `POST /search` with loading/error/empty states + stale-response guard; a tapped tag also searches. Results mapped via `mapItem` (§8.6, §11.1) |
 | Reminder toggle | 🟡 Partial | UI toggle built; v1 only persists `reminder_enabled` — notification delivery is **v2** (§8.5) |
 | Card title rename + accent rule | ✅ Done | `descriptor`/`title` collapsed to single `name`; `titleAccent(name)` renders first two words in accent client-side (card + detail) (§8.1, §6.2, §6.4) |
 | Liquid Glass | 🟡 Partial | Applied on the speed-dial FAB only; sheets/search still opaque |
@@ -823,8 +823,9 @@ _Snapshot: 2026-06-20. Real Supabase data layer (direct client + RLS, Realtime f
 | Per-user dedup | ✅ Done | partial `unique (user_id, normalized_url)`; idempotent create returns `{deduped}`; conservative normalisation (§8.3) |
 | AI tagging (name/summary/tags) | ✅ Done | Worker Gemini 2.5 Flash-Lite structured call, active. Grounded prompt (only non-empty signals; URL-based generic summary when title/content absent) to avoid hallucination (§8.5) |
 | Content parsing (backend) | ✅ Done | OOP parser module (`getParser`): YouTube oEmbed, Instagram GraphQL caption (posts/reels), Reddit OG, website (OG + full-text word-count); IP-walled bodies → `fetch_failed` for the client path. `normalize-url`/`tldts` for URLs (§8.4) |
-| `raw_content` field | ✅ Done | Column live; worker writes it immutably as the v2-embedding base |
-| Semantic search + embeddings (v2) | ⛔ v2 | pgvector, `text-embedding-3-small`, `POST /search`, `reembed` (§8.6) |
+| `raw_content` field | ✅ Done | Column live; worker writes it immutably as the re-embed / re-summarise base |
+| Semantic + fuzzy search | ✅ Done | `embedding vector(768)` (Gemini `gemini-embedding-001`@768, L2-normalized) written by `enrich-item`; `pg_trgm` + HNSW; `POST /search` Edge fn = Composite over semantic (pgvector) + fuzzy (`word_similarity` on name/tags) strategies, fused by RRF; existing items backfilled (§8.6, §11.1) |
+| Re-embed on edit (v2) | ⛔ v2 | `enrich-item` `embed` mode exists (used by backfill); the name/tag-edit trigger + edit support are deferred — edited items keep their original embedding (§8.6, §11.1) |
 | Failure retry / `reprocess` (v2) | ⛔ v2 | v1 failed → Remove; reprocess endpoint + Try-again deferred (§8.2) |
 | Reminder delivery (v2) | ⛔ v2 | v1 stores toggle only; scheduling/notification deferred (§8.5) |
 | YouTube transcript + duration (v2) | ⛔ v2 | Server-side IP-walled; v1 ships oEmbed title+thumbnail only. v2 = client-side fetch (residential IP) or proxied API (§2, §8.4) |
@@ -885,11 +886,11 @@ The caller (the Edge Function handler) only talks to `Search`. Adding a third st
 
 **Indexing — `enrich-item` generates and stores the embedding.** When `enrich-item` produces `name`/`summary`/`tags`, it also calls OpenAI with the structured string above and writes the result to the `embedding` column in the same terminal write. No separate worker mode needed at this scale — the embedding generation is a single fast API call appended to the existing Gemini call.
 
-Re-embed on edit (§8.6) remains the design: a name or tag edit fires a Postgres trigger → pg_net → `reembed` mode of the worker, regenerating only the `embedding` column. This is unchanged from §8.6.
+**✅ Built (2026-06-20).** The hybrid search above is implemented and live: migrations `20260620200000_search_embeddings` + `20260620210000_fuzzy_word_similarity` (vector + pg_trgm, `embedding vector(768)`, HNSW + name-trigram indexes, the two strategy RPCs); the shared `_shared/embedding.ts` helper; `enrich-item` writes the embedding in its terminal write (plus an `embed` mode used for backfill); the `search` Edge function (Composite + RRF); and the app's search screen calls it. **Embedding provider revised to Gemini `gemini-embedding-001`@768** (reuses the existing key; not OpenAI). The open items below are resolved:
 
-#### Still in progress
+1. **Merge and ranking — RRF (k=60), in TS.** `score(id) = Σ 1/(60 + rank)` over each strategy's ranked list; scale-invariant, rewards cross-strategy agreement. Extends to a weighted form later without changing the architecture.
+2. **Fuzzy — `word_similarity`, threshold 0.4.** Switched from `similarity()` (whole-string; a typo against a long title scored ~0.23) to `word_similarity()` (best-window; exact-word ~1.0, that typo ~0.62), so the threshold rises to 0.4. Tunable per RPC arg.
+3. **HNSW parameters — defaults** (m=16, ef_construction=64); adequate at this scale.
+4. **Empty-summary fallback — implemented.** When `summary` is absent, `buildEmbeddingInput` uses the first ~2000 chars of `raw_content` as the Summary field.
 
-1. **Merge and ranking strategy.** The `merge()` step needs a concrete algorithm. Options: (a) deduplicate by item `id`, interleave results alternating by source; (b) normalise each strategy's results to a 0–1 score and compute a weighted sum (`0.6 × semantic + 0.4 × fuzzy`); (c) Reciprocal Rank Fusion (RRF) — a parameter-free rank-combination formula that is robust to score-scale differences. RRF is the leading candidate; decide before implementation.
-2. **Fuzzy threshold tuning.** `pg_trgm` has a similarity threshold (`pg_trgm.similarity_threshold`) that controls the minimum overlap for a match. Too low returns noise; too high misses useful near-matches. Needs empirical tuning against real item data.
-3. **HNSW index parameters.** pgvector's HNSW index has two build-time parameters (`m`, `ef_construction`) that trade index size / build time against recall quality. Defaults are reasonable at this scale but should be validated once real items are indexed.
-4. **Whether to include `raw_content` in the embedding for items where `summary` is absent.** If `enrich-item` fails to produce a summary (degraded Gemini call), the structured string reduces to `Title: [name]\nTags: [...]`. This may be too sparse for meaningful semantic matching. Fallback: use the first N tokens of `raw_content` as a substitute for `summary` in the embedding input for those items only.
+**Remaining (v2): re-embed on edit.** The design stands — a name/tag edit fires a Postgres trigger → pg_net → `enrich-item` `embed` mode (the embed primitive already exists), regenerating only the `embedding` column, guarded so it doesn't self-trigger. Deferred per scope; edited items keep their original embedding until then.

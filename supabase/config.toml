@@ -3,6 +3,9 @@ project_id = "hpnxuouiyrhlqabkgmis"
 [functions.create-item]
 verify_jwt = true
 
+[functions.search]
+verify_jwt = true
+
 [functions.fetch-item]
 verify_jwt = false
 
