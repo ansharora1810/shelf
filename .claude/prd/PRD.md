@@ -877,7 +877,7 @@ One row per item (the create constraint) gives dedup for free, and the watchdog 
 **Design — drainer per worker type.** Replace the immediate-fire triggers with **pg_cron drainers** that pull from the table and pace dispatch.
 
 - **Remove** the two fire triggers (`items_fire_worker` on insert, `items_fire_enrich` on update). The `status_changed_at` trigger stays.
-- **Two drainers**, one per stage, each on a **sub-minute** pg_cron schedule, each with its own concurrency cap **`K`**. Per tick:
+- **Two drainers**, one per stage, each on a **5-second** pg_cron schedule, each with its own concurrency cap **`K`**. (5s is the chosen interval: avg dispatch latency ~2.5s, a small fraction of the 90s watchdog budget. pg_cron supports down to 1s; requires Postgres ≥ 15.1.1.61 for seconds-level schedules — **verify the live project's version** before deploying, since an older instance only does 1-minute granularity.) Per tick:
   1. `in_flight = count(rows in this stage with dispatched_at set)`
   2. if `in_flight >= K`: do nothing (wait for the next tick)
   3. else claim up to `K − in_flight` undispatched rows — `… WHERE status = <stage> AND dispatched_at IS NULL ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT (K − in_flight)` — set `dispatched_at = now()`, and fire `pg_net` to the worker for each claimed row (same payload as today).
@@ -888,13 +888,15 @@ One row per item (the create constraint) gives dedup for free, and the watchdog 
 - Set by the drainer when it claims a row; means "an invocation for the row's *current* stage is in flight."
 - **Cleared automatically on any status change**, folded into the existing `shelf_touch_status_changed_at` trigger (the same condition that bumps `status_changed_at` also nulls `dispatched_at`). So `dispatched_at` is always scoped to the current status, and neither the worker nor the watchdog has to clear it by hand. The drainer's claim sets it *without* changing `status`, so the trigger doesn't clobber it.
 
+**Cron-log housekeeping.** pg_cron writes one `cron.job_run_details` row per execution. Two drainers at 5s ≈ 35k rows/day, which grows unbounded and eventually slows the cron schema. A third, cheap pg_cron job runs **hourly** to prune it — `DELETE FROM cron.job_run_details WHERE end_time < now() - interval '24 hours'` (retention tunable; 24h is plenty for debugging). Low dev — one scheduled `DELETE`. (Pricing is unaffected: pg_cron has no per-job cost on any tier, free included — it's resource-bound only.)
+
 **Watchdog — unchanged in shape (Option A).** The watchdog still keys on `status` only (§11.1 rules intact). Because `dispatched_at` touches neither `status` nor `status_changed_at`, the time-in-state clocks run **continuously from state entry** — claiming a row does **not** reset its deadline. This is deliberate: the entire backend is one processing unit and the clock starts when the user saved, so queue-wait + dispatch + processing all count against the one budget. The watchdog also remains the **only** safety net for a dropped/crashed invocation — there is no visibility timeout (a dropped invocation leaves `dispatched_at` set but `status` unchanged; the row never re-dispatches and instead ages out via its existing per-state rule).
 
 **Trade-offs (accepted):**
 
 | Trade-off | Detail | Why accepted |
 |---|---|---|
-| **Dispatch latency** | A freshly-eligible row waits up to one cron interval (avg ½ interval) before dispatch, vs. the old ~zero-latency fire. | The price of concurrency control. Keep the interval sub-minute (well under the 90s watchdog) so it's a small fraction of the budget. Requires pg_cron sub-minute scheduling (≥ 1.5) — **verify on the live project** before relying on it. |
+| **Dispatch latency** | A freshly-eligible row waits up to one cron interval (~5s, avg ~2.5s) before dispatch, vs. the old ~zero-latency fire. | The price of concurrency control, and a small fraction of the 90s watchdog budget. Requires Postgres ≥ 15.1.1.61 for the seconds-level schedule — **verify on the live project** before relying on it. |
 | **Stuck `dispatched_at` occupies a slot** | A dropped/crashed invocation leaves `dispatched_at` set; that row counts against `in_flight` (throttling the drainer) until the watchdog ages the row out of its state. | Bounded by the watchdog deadline, and it's arguably correct back-pressure: if invocations are being dropped, throttling is the right reaction. Avoids reintroducing a visibility-timeout/lease mechanism. |
 | **No retry of a dropped invocation** | A dropped fetch ages `started → fetch_failed` (handed to the client path); a dropped enrich ages `fetched → failed` (terminal, content discarded). | Consistent with §11.1's "no worker retries in v1." The client path is the natural recovery for fetch; enrich failure is terminal as designed. |
 
@@ -902,7 +904,7 @@ This is the foundation only — it makes throughput **degrade gracefully (queue 
 
 #### Still in progress
 
-1. **`K` values and cron interval.** Pick `K_fetch` / `K_enrich` against the actual Edge concurrency ceiling and Gemini rate limit; pick the drainer interval (sub-minute) against the 90s watchdog budget. Confirm Supabase's pg_cron supports sub-minute schedules on this project.
+1. **`K` values and the Postgres-version prerequisite.** Pick `K_fetch` / `K_enrich` against the actual Edge concurrency ceiling and Gemini rate limit. The drainer interval is decided (5s); confirm the live project runs Postgres ≥ 15.1.1.61 so seconds-level scheduling is available (otherwise it falls back to 1-minute granularity, which breaks the latency budget).
 2. **`in_flight` accounting precision vs. the `dispatched_at` slot leak.** The stuck-slot trade-off above means `in_flight` can over-count under failure, under-utilising `K`. If that bites, the minimal fix is a short **dispatch lease** (`dispatched_at < now() - lease` → reclaimable) — but that is a visibility timeout by another name and was deliberately excluded; only add it if slot-leak throttling proves real.
 3. **Whether the enrich drainer should prioritise `client_fetched` over `fetched`.** A `client_fetched` row has a user who just reopened the app and is actively waiting; a `fetched` row is mid-backend-pipeline. `ORDER BY` could favour `client_fetched` for perceived latency. Cosmetic; revisit if it matters.
 4. **pgmq upgrade seam.** If true multi-consumer, archival/replay, or queue-depth metrics are ever needed, swap the table-as-queue for **pgmq**: the drainer reads from pgmq instead of `… WHERE status = <stage>`, the trigger `pgmq.send`s instead of being removed, and the worker is unchanged. Deferred — at this scale it only adds a dual-write (row + message) consistency burden for no gain (§8.9).
