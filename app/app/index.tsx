@@ -21,6 +21,7 @@ import { getTopTags, groupLinksByPeriod } from '../src/data/feed'
 import { useShelf } from '../src/store/shelf'
 import { Link, Project } from '../src/types'
 import { titleAccent, formatConsumeTime } from '../src/data/title'
+import { isProcessing } from '../src/data/status'
 import { Colors, FontFamily, Spacing, Radius } from '../src/constants/tokens'
 import { Thumbnail } from '../src/components/Thumbnail'
 import { ShimmerText } from '../src/components/ShimmerText'
@@ -160,7 +161,7 @@ function LinkCard({ link, width = CARD_WIDTH }: { link: Link; width?: number }) 
         />
         {link.consumeTime ? <ConsumeTimeBadge seconds={link.consumeTime} /> : null}
       </View>
-      {link.status === 'processing' ? (
+      {isProcessing(link.status) ? (
         <View style={styles.cardTitle}>
           <ShimmerText text={link.source} style={styles.cardTitleMain} numberOfLines={1} />
         </View>

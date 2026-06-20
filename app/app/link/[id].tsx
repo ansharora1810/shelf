@@ -25,6 +25,7 @@ import { Thumbnail } from '../../src/components/Thumbnail'
 import { ShimmerText } from '../../src/components/ShimmerText'
 import { sourceIcon } from '../../src/data/source'
 import { titleAccent, formatConsumeTime } from '../../src/data/title'
+import { isProcessing } from '../../src/data/status'
 import { Colors, FontFamily, Spacing, Radius } from '../../src/constants/tokens'
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window')
@@ -118,7 +119,7 @@ export default function LinkDetailScreen() {
         {/* Body */}
         <View style={styles.body}>
           {/* Title */}
-          {link.status === 'processing' ? (
+          {isProcessing(link.status) ? (
             <ShimmerText text={link.source} style={styles.titleMain} numberOfLines={2} />
           ) : (
             <Text style={styles.title}>

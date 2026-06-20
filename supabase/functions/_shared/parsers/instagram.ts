@@ -1,8 +1,7 @@
 import { FullContent, Parser } from "./types.ts";
 import { fetchWithTimeout } from "./http.ts";
 import { metaProperty, parseMeta } from "./html.ts";
-
-const CONTENT_TIMEOUT_MS = 10_000;
+import { CONTENT_FETCH_TIMEOUT_MS as CONTENT_TIMEOUT_MS, IG_NAME_MAX_LEN } from "../constants.ts";
 
 // Instagram's own web client reads posts through `/api/graphql` with a
 // persisted query (`doc_id`) and the public web app id — no cookie required.
@@ -73,7 +72,7 @@ export class InstagramParser implements Parser {
         title: this.captionToTitle(media.caption, media.ownerUsername),
         rawContent: media.caption,
         consumeTime: media.isVideo ? media.videoDuration : null,
-        thumbnailUrl: media.thumbnailUrl,
+        thumbnailUrl: this.mediaThumbnail(url) ?? media.thumbnailUrl,
       };
     }
 
@@ -90,7 +89,7 @@ export class InstagramParser implements Parser {
       title,
       rawContent: captioned ? metaProperty(html, "og:description") : null,
       consumeTime: null,
-      thumbnailUrl,
+      thumbnailUrl: this.mediaThumbnail(url) ?? thumbnailUrl,
     };
   }
 
@@ -140,11 +139,22 @@ export class InstagramParser implements Parser {
     return res?.ok ? res.text() : null;
   }
 
+  // Title is "@<owner>: <caption>" (first caption line), truncated to 100 chars.
   private captionToTitle(caption: string | null, owner: string | null): string | null {
-    const firstLine = caption?.split("\n").map((s) => s.trim()).find(Boolean);
-    if (firstLine) {
-      return firstLine.length > 100 ? `${firstLine.slice(0, 100).trimEnd()}…` : firstLine;
-    }
-    return owner ? `Instagram post by @${owner}` : null;
+    const firstLine = caption?.split("\n").map((s) => s.trim()).find(Boolean) ?? null;
+    const handle = owner ? `@${owner}` : null;
+    const combined = handle && firstLine ? `${handle}: ${firstLine}` : (handle ?? firstLine);
+    if (!combined) return null;
+    return combined.length > IG_NAME_MAX_LEN ? `${combined.slice(0, IG_NAME_MAX_LEN).trimEnd()}…` : combined;
+  }
+
+  // The /p/<shortcode>/media/?size=l redirect is tokenless and 302s to a fresh
+  // signed image on every load, so the stored URL never expires (unlike the
+  // display_url / og:image CDN URLs, whose signed tokens lapse in hours). We only
+  // build the string; the app's <Image> follows the redirect natively at render —
+  // nothing fetches it here.
+  private mediaThumbnail(url: string): string | null {
+    const { shortcode } = parseUrl(url);
+    return shortcode ? `https://www.instagram.com/p/${shortcode}/media/?size=l` : null;
   }
 }

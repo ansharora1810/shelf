@@ -802,7 +802,7 @@ States:
 
 Functions:
 - **`create-item`** (unchanged) — normalize → dedup → insert at `started` → return. Unchanged but for the status name.
-- **`fetch-item`** (today's `process-item`, descoped) — fetch raw content only; no Gemini. `started → fetched | fetch_failed`.
+- **`fetch-item`** (today's `process-item`, descoped) — fetch raw content only; no Gemini. `started → fetched | fetch_failed`. **Criterion:** the row goes to `fetched` only if the backend obtained a usable **body** (`raw_content`); if the body is absent it goes to `fetch_failed` even when a title/thumbnail were obtained (e.g. YouTube oEmbed yields title+thumbnail but no description). This is what routes YouTube / Instagram / Reddit — whose bodies the datacenter IP can't reach — to the app's deeper fetch (items 2–4 below), while a cleanly-scraped website goes straight to `fetched`. Whatever title/thumbnail/source the backend *did* get is still persisted, so the app augments rather than starts blank.
 - **`enrich-item`** (new) — one grounded Gemini call over `raw_content` → name/summary/tags. `fetched | client_fetched → ready`.
 - **App** (client) — on `fetch_failed`, fetch via the hidden webview. `fetch_failed → client_fetched`. (Webview mechanics are a separate abstraction, out of scope here.)
 
@@ -846,8 +846,118 @@ Schema deltas this implies:
 - add `status_changed_at` (bumped only when `status` changes; drives the time-in-state watchdog deadlines).
 - `DELETE` stays blocked on all non-terminal states, allowed on `ready` / `failed`.
 
+**Client extraction — per source (verified).** The app's fetcher is a hidden `WKWebView` (`react-native-webview`). Critically, it is a **logged-out** context: iOS sandboxes a `WKWebView`'s cookie store per app, so the user's Safari/Chrome sessions never reach it, and Shelf has no in-app login for these sites. So every recipe must work logged-out.
+- **YouTube** (FULL): read `window.ytInitialPlayerResponse.videoDetails` → `title`, `shortDescription`→`raw_content`, `lengthSeconds`→`consume_time`, `author`, highest-res thumbnail. The description/duration the backend oEmbed can't get.
+- **Instagram** (caption + author; verified logged-out, HTTP 200, no login wall): `og:title`→title/author, `og:description`→caption (strip the `"N likes, M comments - user on date:"` prefix). **Thumbnail = the `instagram.com/p/<shortcode>/media/?size=l` redirect built from the URL's shortcode**, *not* `og:image` — the latter's signed CDN tokens expire in hours; the `/media/` redirect is tokenless and 302s to a fresh image each load, so the stored URL never goes stale. Loads via native `<Image>` (no CORS).
+- **Reddit** (og tags only): the in-app WebView is logged-out, and Reddit's `.json` view returns the SPA shell (not JSON) without a session — confirmed via curl + logged-out headless Chrome (only a *signed-in* browser gets JSON). So Reddit uses `og:title`/`og:description`/`og:image` from the SSR HTML, like Instagram. `.json` was tried and dropped.
+- **Website** (default): `document.title`/og tags + boilerplate-stripped `body.innerText`.
+
 #### Still in progress
 
 1. **Securing the app's direct DB writes (the `raw_content` / Gemini-bill problem).** The app must write `raw_content` — it's the fetch source in this design — so we can't simply block client writes to that column. But an unconstrained client `.update()` lets a user write arbitrary `raw_content` that we then feed to Gemini (running up the API bill), or set `status` directly and skip stages. RLS scopes the damage to the user's own rows (no cross-user impact), so it's tolerable for v1 with no users, but it's a real cost/abuse vector. Needed: a guarded write path (e.g. a `SECURITY DEFINER` RPC) that (a) permits only the `fetch_failed → client_fetched` transition from the correct source state, (b) restricts writable columns to `raw_content` / `status` / `app_fetch_attempts`, and (c) **bounds `raw_content` size** to cap Gemini cost. The tension: the app legitimately supplies the content, so the guard has to constrain *shape / size / transition*, not forbid the write. Prioritize when subscriptions / paid tiers land, or earlier if Gemini spend needs protecting.
 2. **Tuning:** the client attempt cap `N`, and the per-state watchdog deadlines. Splitting fetch from Gemini lets each get its own deadline above its stage's P99 — tighter than today's single 120s.
 3. **Watchdog vs. in-flight final attempt (race).** Because the app increments *before* fetching (claim-then-work), a row becomes count-gate-eligible (`>= N`) at the **start** of its Nth attempt. If the cron sweep lands during that fetch, the watchdog sets `failed` and the app's (successful) Nth `client_fetched` write then no-ops on its `WHERE status='fetch_failed'` guard — a fetchable item is lost. The window is only the final attempt (rows at `count < N` never match the count gate). This is the same no-fencing-token trade-off as §8.2. **Decide:** accept it (rare, last attempt only, user can Remove + re-add), or add a small staleness gate to the finalize — `AND last_app_attempt_at < now() - grace` (grace > max webview fetch), which needs a `last_app_attempt_at` column set on each claim so the watchdog won't finalize a row the app is actively working.
+4. **Expiring thumbnails.** CDN-signed `og:image` URLs carry time-limited tokens and 404 after hours — affects **Reddit** (`preview.redd.it`) and the backend **Instagram GraphQL** thumbnail. Instagram (client path) is already solved via the tokenless `/p/<shortcode>/media/?size=l` redirect; there's no clean equivalent for the others. v1 accepts stale-image risk; v2 fix is to **rehost the thumbnail to Supabase Storage at fetch time** (or proxy + re-sign) so the stored URL is durable.
+
+### 11.2 Paced dispatch — concurrency-bounded worker invocation
+
+**What we're solving for.** Today the pipeline triggers fire the workers **immediately** via `pg_net` (an `AFTER INSERT` kick to `fetch-item`, an `AFTER UPDATE` kick to `enrich-item`, §11.1). Each save (or each fetch→enrich handoff) becomes a synchronous, uncontrolled HTTP invocation. There is **no back-pressure**: a burst of concurrent saves produces a burst of concurrent invocations, and once the Edge Function concurrency ceiling is hit the surplus invocations are **rejected and silently dropped** — `pg_net` is fire-and-forget and nobody reads `net._http_response`. The dropped item then sits untouched until the watchdog ages it out (90s, §11.1). So past a handful of concurrent operations the app doesn't slow down — it **fails**. This bounds real throughput to roughly the Edge concurrency limit (single digits on the free tier).
+
+The fix: stop firing invocations from the triggers. Buffer the work and dispatch it at a **controlled rate** that never exceeds what the workers can absorb. Surplus waits durably instead of being dropped.
+
+**Key reframe — the `items` table is already the queue.** A queue is a durable list of work waiting to be claimed; `items` keyed by `status` is exactly that, and `status` already partitions it into the two queues the two worker types need:
+
+| Logical queue | Rows | Worker |
+|---|---|---|
+| fetch | `status = 'started'` | `fetch-item` |
+| enrich | `status IN ('fetched', 'client_fetched')` | `enrich-item` |
+
+One row per item (the create constraint) gives dedup for free, and the watchdog already operates over these states. **No pgmq, no separate queue, no daemon/long-poll consumer** — a persistent consumer would be always-on compute, the exact ever-running cost the stack avoids (§8.9), and Edge Functions are invocation-scoped and can't be daemons anyway. The workers stay **stateless HTTP functions, unchanged in shape**.
+
+**Design — drainer per worker type.** Replace the immediate-fire triggers with **pg_cron drainers** that pull from the table and pace dispatch.
+
+- **Remove** the two fire triggers (`items_fire_worker` on insert, `items_fire_enrich` on update). The `status_changed_at` trigger stays.
+- **Two drainers**, one per stage, each on a **5-second** pg_cron schedule, each with its own concurrency cap **`K`**. (5s is the chosen interval: avg dispatch latency ~2.5s, a small fraction of the 90s watchdog budget. pg_cron supports down to 1s; requires Postgres ≥ 15.1.1.61 for seconds-level schedules — **verify the live project's version** before deploying, since an older instance only does 1-minute granularity.) Per tick:
+  1. `in_flight = count(rows in this stage with dispatched_at set)`
+  2. if `in_flight >= K`: do nothing (wait for the next tick)
+  3. else claim up to `K − in_flight` undispatched rows — `… WHERE status = <stage> AND dispatched_at IS NULL ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT (K − in_flight)` — set `dispatched_at = now()`, and fire `pg_net` to the worker for each claimed row (same payload as today).
+- **`FOR UPDATE SKIP LOCKED`** makes the claim safe under overlapping ticks or multiple drainers: a row another tick already locked is skipped, not waited on — no double-dispatch, no blocking.
+- **`K` is per-stage and independent.** `K = min(edge concurrency ceiling, the stage's own bottleneck)`. `fetch-item` is I/O-bound (external sites, oEmbed, IG GraphQL) — mostly waiting, tolerates a higher `K`. `enrich-item`'s binding constraint is usually the **Gemini rate limit**, not Edge concurrency. Surplus beyond `K` simply waits in `started` / `fetched`.
+
+**New column — `dispatched_at timestamptz` (orthogonal to `status`, not a status value).**
+- Set by the drainer when it claims a row; means "an invocation for the row's *current* stage is in flight."
+- **Cleared automatically on any status change**, folded into the existing `shelf_touch_status_changed_at` trigger (the same condition that bumps `status_changed_at` also nulls `dispatched_at`). So `dispatched_at` is always scoped to the current status, and neither the worker nor the watchdog has to clear it by hand. The drainer's claim sets it *without* changing `status`, so the trigger doesn't clobber it.
+
+**Cron-log housekeeping.** pg_cron writes one `cron.job_run_details` row per execution. Two drainers at 5s ≈ 35k rows/day, which grows unbounded and eventually slows the cron schema. A third, cheap pg_cron job runs **hourly** to prune it — `DELETE FROM cron.job_run_details WHERE end_time < now() - interval '24 hours'` (retention tunable; 24h is plenty for debugging). Low dev — one scheduled `DELETE`. (Pricing is unaffected: pg_cron has no per-job cost on any tier, free included — it's resource-bound only.)
+
+**Watchdog — unchanged in shape (Option A).** The watchdog still keys on `status` only (§11.1 rules intact). Because `dispatched_at` touches neither `status` nor `status_changed_at`, the time-in-state clocks run **continuously from state entry** — claiming a row does **not** reset its deadline. This is deliberate: the entire backend is one processing unit and the clock starts when the user saved, so queue-wait + dispatch + processing all count against the one budget. The watchdog also remains the **only** safety net for a dropped/crashed invocation — there is no visibility timeout (a dropped invocation leaves `dispatched_at` set but `status` unchanged; the row never re-dispatches and instead ages out via its existing per-state rule).
+
+**Trade-offs (accepted):**
+
+| Trade-off | Detail | Why accepted |
+|---|---|---|
+| **Dispatch latency** | A freshly-eligible row waits up to one cron interval (~5s, avg ~2.5s) before dispatch, vs. the old ~zero-latency fire. | The price of concurrency control, and a small fraction of the 90s watchdog budget. Requires Postgres ≥ 15.1.1.61 for the seconds-level schedule — **verify on the live project** before relying on it. |
+| **Stuck `dispatched_at` occupies a slot** | A dropped/crashed invocation leaves `dispatched_at` set; that row counts against `in_flight` (throttling the drainer) until the watchdog ages the row out of its state. | Bounded by the watchdog deadline, and it's arguably correct back-pressure: if invocations are being dropped, throttling is the right reaction. Avoids reintroducing a visibility-timeout/lease mechanism. |
+| **No retry of a dropped invocation** | A dropped fetch ages `started → fetch_failed` (handed to the client path); a dropped enrich ages `fetched → failed` (terminal, content discarded). | Consistent with §11.1's "no worker retries in v1." The client path is the natural recovery for fetch; enrich failure is terminal as designed. |
+
+This is the foundation only — it makes throughput **degrade gracefully (queue and wait) instead of failing (drop)** under concurrency, without adding infra. It is **not** auto-scaling: raising real throughput still means raising `K` (and the underlying Edge/Gemini limits) or adding worker capacity. With `K` ≈ the current ceiling and at single-user volume the behaviour is unchanged; the win is purely what happens under burst.
+
+#### Still in progress
+
+1. **`K` values and the Postgres-version prerequisite.** Pick `K_fetch` / `K_enrich` against the actual Edge concurrency ceiling and Gemini rate limit. The drainer interval is decided (5s); confirm the live project runs Postgres ≥ 15.1.1.61 so seconds-level scheduling is available (otherwise it falls back to 1-minute granularity, which breaks the latency budget).
+2. **`in_flight` accounting precision vs. the `dispatched_at` slot leak.** The stuck-slot trade-off above means `in_flight` can over-count under failure, under-utilising `K`. If that bites, the minimal fix is a short **dispatch lease** (`dispatched_at < now() - lease` → reclaimable) — but that is a visibility timeout by another name and was deliberately excluded; only add it if slot-leak throttling proves real.
+3. **Whether the enrich drainer should prioritise `client_fetched` over `fetched`.** A `client_fetched` row has a user who just reopened the app and is actively waiting; a `fetched` row is mid-backend-pipeline. `ORDER BY` could favour `client_fetched` for perceived latency. Cosmetic; revisit if it matters.
+4. **pgmq upgrade seam.** If true multi-consumer, archival/replay, or queue-depth metrics are ever needed, swap the table-as-queue for **pgmq**: the drainer reads from pgmq instead of `… WHERE status = <stage>`, the trigger `pgmq.send`s instead of being removed, and the worker is unchanged. Deferred — at this scale it only adds a dual-write (row + message) consistency burden for no gain (§8.9).
+
+### 11.3 Search architecture — Composite + Strategy (semantic + fuzzy)
+
+**What we're solving for.** §8.6 specifies semantic search as a v2 differentiator but leaves the internal architecture open. Two decisions were settled: (a) what text to embed per item, and (b) how to structure the search code to compose semantic and fuzzy search cleanly.
+
+**Embedding input — structured prose, not raw concatenation.** §8.6 originally specified `raw_content + current name + current tags` as the embedding source. This is revised. Two problems with `raw_content` as the embedding input: (1) website `raw_content` is often thousands of tokens — full page text including navigation, footers, and boilerplate — and the model's token limit (~8,000 for `text-embedding-3-small`) means the tail is silently truncated, often losing the most substantive content; (2) dumping fields together without structure loses the signal about what each part means.
+
+The agreed input is a **labelled, structured string** built from the fields the `enrich-item` worker already produces:
+
+```
+Title: [name]
+Tags: [tag1, tag2, tag3, ...]
+Summary: [summary]
+```
+
+`summary` is the AI-distilled meaning of the full content — denser and more semantically coherent than truncated `raw_content`. `name` and `tags` reinforce findability. The labels (`Title:`, `Tags:`, `Summary:`) give the model context about each part's role; the model has seen this pattern extensively and weights accordingly. `raw_content` remains stored immutably (§8.1) as the source of truth for future re-summarisation or re-embedding, but is not itself fed to the embedding model.
+
+**Code design — Composite over Strategy.** The `POST /search` Edge Function hosts a `Search` class that is a **Composite** (Gang of Four) over two **Strategy** implementations, all sharing the same `ISearch` interface:
+
+```typescript
+interface ISearch {
+  search(query: string, userId: string): Promise<Item[]>
+}
+
+class FuzzySearch implements ISearch { ... }    // pg_trgm on name + tags
+class SemanticSearch implements ISearch { ... } // pgvector on embedding column
+class Search implements ISearch {               // composite: runs both, merges
+  constructor(private strategies: ISearch[]) {}
+  async search(query, userId) {
+    const results = await Promise.all(
+      this.strategies.map(s => s.search(query, userId))
+    )
+    return merge(results) // deduplicate by id, rank
+  }
+}
+```
+
+The caller (the Edge Function handler) only talks to `Search`. Adding a third strategy (e.g. BM25 full-text) is one new class and one constructor argument; the merge and ranking logic is untouched.
+
+**Fuzzy search scope — `name` and `tags` only, not `raw_content`.** `pg_trgm` (trigram matching) is designed for short strings. On long body text it is slow, expensive, and returns noise — nearly every document shares trigrams with every short query. Fuzzy search's value is handling typos and near-misspellings in the structured fields a user can directly see and type (`name`, `tags`). `raw_content` is excluded from fuzzy scope entirely.
+
+**Semantic search scope — `embedding` column, queried via pgvector.** The `SemanticSearch` strategy embeds the user's query (same OpenAI API call, server-side key) and runs a cosine-distance `<=>` query against the HNSW-indexed `embedding` column. Returns items ranked by vector closeness. Handles synonym and concept matching that fuzzy cannot (`soy` surfaces `soya`, `machine learning` surfaces `neural networks`).
+
+**Indexing — `enrich-item` generates and stores the embedding.** When `enrich-item` produces `name`/`summary`/`tags`, it also calls OpenAI with the structured string above and writes the result to the `embedding` column in the same terminal write. No separate worker mode needed at this scale — the embedding generation is a single fast API call appended to the existing Gemini call.
+
+Re-embed on edit (§8.6) remains the design: a name or tag edit fires a Postgres trigger → pg_net → `reembed` mode of the worker, regenerating only the `embedding` column. This is unchanged from §8.6.
+
+#### Still in progress
+
+1. **Merge and ranking strategy.** The `merge()` step needs a concrete algorithm. Options: (a) deduplicate by item `id`, interleave results alternating by source; (b) normalise each strategy's results to a 0–1 score and compute a weighted sum (`0.6 × semantic + 0.4 × fuzzy`); (c) Reciprocal Rank Fusion (RRF) — a parameter-free rank-combination formula that is robust to score-scale differences. RRF is the leading candidate; decide before implementation.
+2. **Fuzzy threshold tuning.** `pg_trgm` has a similarity threshold (`pg_trgm.similarity_threshold`) that controls the minimum overlap for a match. Too low returns noise; too high misses useful near-matches. Needs empirical tuning against real item data.
+3. **HNSW index parameters.** pgvector's HNSW index has two build-time parameters (`m`, `ef_construction`) that trade index size / build time against recall quality. Defaults are reasonable at this scale but should be validated once real items are indexed.
+4. **Whether to include `raw_content` in the embedding for items where `summary` is absent.** If `enrich-item` fails to produce a summary (degraded Gemini call), the structured string reduces to `Title: [name]\nTags: [...]`. This may be too sparse for meaningful semantic matching. Fallback: use the first N tokens of `raw_content` as a substitute for `summary` in the embedding input for those items only.

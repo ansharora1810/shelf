@@ -5,8 +5,8 @@ import { getParser, resolveFinalUrl } from "../_shared/parsers/index.ts";
 const WORKER_SECRET = Deno.env.get("WORKER_SECRET")!;
 
 // Read-only probe of the worker's fetch stage on Supabase's datacenter IP, so
-// the bot-walls process-item hits in production are visible directly. Same
-// resolve → classify → parser path as process-item/index.ts:88-102 — no DB, no
+// the bot-walls fetch-item hits in production are visible directly. Same
+// resolve → classify → parser path as fetch-item/index.ts — no DB, no
 // Gemini. Guarded by the shared worker secret so it isn't an open fetch proxy:
 // pass it as the x-worker-secret header or a ?secret= query param.
 Deno.serve(async (req) => {

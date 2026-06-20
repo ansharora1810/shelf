@@ -1,6 +1,12 @@
 # Shelf Edge Functions
 
-Two Deno/TypeScript functions deployed on Supabase Edge Functions.
+Three Deno/TypeScript functions deployed on Supabase Edge Functions, implementing the
+staged client-assisted fetch pipeline (PRD §11.1):
+
+```
+create-item → [started] → fetch-item → [fetched]        → enrich-item → [ready]
+                                      → [fetch_failed] → app webview → [client_fetched] → enrich-item → [ready]
+```
 
 ## Functions
 
@@ -12,9 +18,8 @@ The user-facing create endpoint. `verify_jwt = true` — the Supabase gateway va
 1. Extracts `user_id` from the validated JWT.
 2. Normalises the URL and classifies its source (`youtube` / `instagram` / `website`).
 3. Deduplicates: if the user already has an item with the same `normalized_url`, returns it with `deduped: true` (and optionally files it into a project if the existing item has none).
-4. Performs fast non-AI enrichment (OG/Twitter meta, YouTube oEmbed) under a 3 s timeout — slow or unreachable origins proceed with `null` fields.
-5. Inserts the row at `status = 'processing'`, returns `{ item, deduped: false }`.
-6. The DB trigger fires `process-item` asynchronously via `pg_net`.
+4. Inserts the row at `status = 'started'` (a DB-only op; no network calls), returns `{ item, deduped: false }`. `status_changed_at` is set by the BEFORE trigger.
+5. The AFTER INSERT trigger fires `fetch-item` asynchronously via `pg_net`.
 
 **Request body:** `{ url: string, project_id?: string | null }`
 
@@ -22,24 +27,39 @@ The user-facing create endpoint. `verify_jwt = true` — the Supabase gateway va
 
 ---
 
-### `process-item` — `POST /functions/v1/process-item`
+### `fetch-item` — `POST /functions/v1/fetch-item`
 
-The async worker. `verify_jwt = false` — called by the DB system, not a user. Protected by the `x-worker-secret` header.
+The fetch stage (was `process-item`, descoped). `verify_jwt = false` — called by the DB system, not a user. Protected by the `x-worker-secret` header.
 
 **What it does:**
 1. Validates the `x-worker-secret` header.
-2. Loads the item by `item_id`; no-ops if `status != 'processing'` (zombie guard).
-3. Fetches full content by source (website text, YouTube transcript, Instagram caption).
-4. Calls Gemini 2.5 Flash-Lite once for structured `{ name, summary, tags[10] }` output.
-5. Writes the terminal state in a **single guarded update** (`WHERE id = ? AND status = 'processing'`):
-   - `status` → `ready` (or `failed` if nothing usable at all)
-   - `summary` — AI-owned, always written
-   - `tags` — union of existing user tags and AI tags (`#all` is a client-side default view, never persisted)
-   - `name` — only filled when the create left it blank (`coalesce` logic)
-   - `consume_time` — only filled when not already set
-   - `raw_content` — immutable base for future embeddings (v2)
+2. Loads the item by `item_id`; no-ops if `status != 'started'` (zombie guard).
+3. Resolves redirects, classifies the destination, fetches full content by source (website text, YouTube oEmbed, Instagram caption, Reddit JSON) → `title`, `raw_content`, `consume_time`, `thumbnail_url`. **No Gemini.**
+4. **Status decision:** `fetched` only if a usable **body** (`raw_content`, non-empty after trim) was obtained; otherwise `fetch_failed` — even when a title/thumbnail were obtained (YouTube oEmbed → title+thumbnail but no body → `fetch_failed`, handed to the app's webview fetch).
+5. **Single guarded write** (status + content together, `WHERE id = ? AND status = 'started'`): corrected `source`, `raw_content`, `name` (user-set else fetched title), `consume_time`/`thumbnail_url` coalesced. Whatever was parsed is persisted either way.
 
-**Request body (from pg_net trigger):** `{ item_id: string, mode: "process" }`
+**Request body (from pg_net trigger):** `{ item_id: string, mode: "fetch" }`
+
+**Response:** `{ ok: true }` (always 200 to pg_net; errors are logged)
+
+---
+
+### `enrich-item` — `POST /functions/v1/enrich-item`
+
+The AI stage. `verify_jwt = false`, `x-worker-secret`, service-role key — same scaffolding as `fetch-item`.
+
+**What it does:**
+1. Validates the `x-worker-secret` header.
+2. Loads the item by `item_id`; no-ops if `status not in ('fetched','client_fetched')` (zombie guard).
+3. Builds the prompt from `name`/title + `raw_content` + `url`; fetches the user's tag vocabulary (`get_user_tags`) to bias tag reuse.
+4. Calls Gemini 2.5 Flash-Lite once for structured `{ name, summary, tags[3..6] }` output.
+5. Writes the terminal state in a **single guarded update** (`WHERE id = ? AND status IN ('fetched','client_fetched')` — `ready` excluded so the write can't self-trigger):
+   - `status` → `ready` (or `failed` only if nothing usable at all)
+   - `summary` — AI-owned, always written
+   - `name` — kept if user-set / fetched, else AI name, else unchanged
+6. `add_item_tags` RPC (union of existing tags and AI tags) — only if the guarded write won.
+
+**Request body (from pg_net trigger):** `{ item_id: string, mode: "enrich" }`
 
 **Response:** `{ ok: true }` (always 200 to pg_net; errors are logged)
 
@@ -59,50 +79,47 @@ platform — do not (and cannot) set them: the `SUPABASE_` prefix is reserved fo
 
 | Variable | Who sets it | Used by |
 |---|---|---|
-| `SUPABASE_URL` | Platform (auto) | Both functions |
+| `SUPABASE_URL` | Platform (auto) | All functions |
 | `SUPABASE_ANON_KEY` | Platform (auto) | `create-item` only |
-| `SUPABASE_SERVICE_ROLE_KEY` | Platform (auto) | `process-item` only |
-| `GEMINI_API_KEY` | You (secret) | `process-item` only — without it the worker still lands `ready`, just with no AI name/summary/tags |
-| `WORKER_SECRET` | You (secret) | `process-item` header check; must equal the Vault `worker_secret` the trigger reads |
+| `SUPABASE_SERVICE_ROLE_KEY` | Platform (auto) | `fetch-item` + `enrich-item` |
+| `GEMINI_API_KEY` | You (secret) | `enrich-item` only — without it the row still lands `ready`, just with no AI name/summary/tags |
+| `WORKER_SECRET` | You (secret) | `fetch-item` + `enrich-item` header check; must equal the Vault `worker_secret` the triggers read |
 
 ---
 
 ## Deployment
 
 ```bash
-# Deploy both functions
-supabase functions deploy create-item --project-ref hpnxuouiyrhlqabkgmis
-supabase functions deploy process-item --project-ref hpnxuouiyrhlqabkgmis
+# Deploy all three functions
+supabase functions deploy create-item  --project-ref hpnxuouiyrhlqabkgmis
+supabase functions deploy fetch-item   --project-ref hpnxuouiyrhlqabkgmis
+supabase functions deploy enrich-item  --project-ref hpnxuouiyrhlqabkgmis
 ```
 
 Or via the Supabase MCP tool:
 ```
 mcp__supabase__deploy_edge_function({ function_name: "create-item" })
-mcp__supabase__deploy_edge_function({ function_name: "process-item" })
+mcp__supabase__deploy_edge_function({ function_name: "fetch-item" })
+mcp__supabase__deploy_edge_function({ function_name: "enrich-item" })
 ```
 
 ---
 
-## pg_net trigger (deployed)
+## pg_net triggers (migration `client_assisted_fetch`)
 
-The `items_fire_worker` AFTER INSERT trigger (migration `shelf_worker_trigger`) calls `process-item`
-via `pg_net`, reading the shared secret from **Supabase Vault** (secret name `worker_secret`) rather
-than a GUC or an inline literal:
+Two AFTER triggers call the workers via `pg_net`, each reading the shared secret from **Supabase Vault**
+(secret name `worker_secret`):
 
-```sql
--- public.shelf_fire_worker() (security definer)
-perform net.http_post(
-  url     => 'https://hpnxuouiyrhlqabkgmis.supabase.co/functions/v1/process-item',
-  body    => jsonb_build_object('item_id', new.id::text, 'mode', 'process'),
-  headers => jsonb_build_object(
-               'Content-Type', 'application/json',
-               'x-worker-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'worker_secret')
-             )
-);
-```
+- `items_fire_worker` — `AFTER INSERT … WHEN (new.status = 'started' AND new.type = 'link')` →
+  `shelf_fire_worker()` posts to `/functions/v1/fetch-item` with `mode='fetch'`.
+- `items_fire_enrich` — `AFTER UPDATE … WHEN (new.status IN ('fetched','client_fetched') AND
+  old.status IS DISTINCT FROM new.status)` → `shelf_fire_enrich()` posts to `/functions/v1/enrich-item`
+  with `mode='enrich'`. `ready` is excluded so enrich-item's own write can't self-trigger.
 
-Fires only `when (new.status = 'processing' and new.type = 'link')`. Fire-and-forget.
+Both are fire-and-forget (at-most-once). `status_changed_at` is maintained by the
+`items_set_status_changed_at` BEFORE trigger.
 
-**To activate the worker, set the secret in two places (must match):**
-1. Vault secret `worker_secret` — `select vault.create_secret('<value>', 'worker_secret');`
-2. Function env `WORKER_SECRET` (dashboard or `supabase secrets set WORKER_SECRET=<value>`)
+**To activate the workers, set the secret in two places (must match):**
+1. Vault secret `worker_secret` — `select vault.create_secret('<value>', 'worker_secret');` (already set)
+2. Function env `WORKER_SECRET` on **both** `fetch-item` and `enrich-item` (dashboard or
+   `supabase secrets set WORKER_SECRET=<value>`)

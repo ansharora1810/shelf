@@ -3,7 +3,10 @@ project_id = "hpnxuouiyrhlqabkgmis"
 [functions.create-item]
 verify_jwt = true
 
-[functions.process-item]
+[functions.fetch-item]
+verify_jwt = false
+
+[functions.enrich-item]
 verify_jwt = false
 
 [functions.probe-fetch]

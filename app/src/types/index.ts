@@ -15,6 +15,7 @@ export interface Link {
   projectId: string | null
   consumeTime: number | null
   savedAt: string // ISO date string
+  appFetchAttempts: number
 }
 
 export interface Project {
